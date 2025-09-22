@@ -144,23 +144,25 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
         let symbol_name = CString::new("ucp_get_nbx").unwrap();
 
         // First try RTLD_NEXT - this should work for library interposition
-        debug!("looking up symbol with RTLD_NEXT: ucp_get_nbx");
+        info!("looking up symbol with RTLD_NEXT: ucp_get_nbx");
         let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
 
         // Check if we got our own function (infinite recursion trap)
         let our_function_addr = ucp_get_nbx as *const () as *mut c_void;
+        info!("Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr);
         if ptr == our_function_addr {
-            debug!("RTLD_NEXT returned our own function, skipping");
+            info!("RTLD_NEXT returned our own function, skipping");
             ptr = std::ptr::null_mut();
         }
 
         if ptr.is_null() {
-            debug!("RTLD_NEXT failed, trying RTLD_DEFAULT");
+            info!("RTLD_NEXT failed, trying RTLD_DEFAULT");
             ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+            info!("RTLD_DEFAULT returned: {:?}", ptr);
 
             // Check again for our own function
             if ptr == our_function_addr {
-                debug!("RTLD_DEFAULT returned our own function, skipping");
+                info!("RTLD_DEFAULT returned our own function, skipping");
                 ptr = std::ptr::null_mut();
             }
         }
