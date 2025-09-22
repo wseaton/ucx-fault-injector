@@ -53,6 +53,11 @@ static LOCAL_STATE: Lazy<LocalFaultState> = Lazy::new(|| {
 // local debug state (not shared)
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// reentrancy guard to prevent infinite recursion
+thread_local! {
+    static IN_INTERCEPT: std::cell::RefCell<bool> = std::cell::RefCell::new(false);
+}
+
 // Socket API command and response structures
 #[derive(Deserialize)]
 struct Command {
@@ -519,6 +524,22 @@ pub extern "C" fn ucp_get_nbx(
     rkey: UcpRkeyH,
     param: UcpRequestParamT,
 ) -> UcsStatusPtr {
+    // Check reentrancy guard to prevent infinite recursion
+    let already_in_intercept = IN_INTERCEPT.with(|flag| {
+        *flag.borrow()
+    });
+
+    if already_in_intercept {
+        // We're being called recursively - this shouldn't happen if we resolve correctly
+        // but as a safety fallback, return success to avoid infinite recursion
+        return std::ptr::null_mut(); // UCS_OK
+    }
+
+    // Set reentrancy guard
+    IN_INTERCEPT.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+
     // Always log the first few calls to verify hook is working
     static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -543,22 +564,31 @@ pub extern "C" fn ucp_get_nbx(
 
     if should_inject_fault_with_state(current_state) {
         let scenario = current_state.1;
-        match scenario {
+        let fault_result = match scenario {
             0 => {
                 warn!(error_code = UCS_ERR_IO_ERROR, "[FAULT] INJECTED: ucp_get_nbx network/IO error (UCS_ERR_IO_ERROR = {})", UCS_ERR_IO_ERROR);
-                return ucs_status_to_ptr(UCS_ERR_IO_ERROR);
+                ucs_status_to_ptr(UCS_ERR_IO_ERROR)
             }
             1 => {
                 warn!(error_code = UCS_ERR_UNREACHABLE, "[FAULT] INJECTED: ucp_get_nbx unreachable error (UCS_ERR_UNREACHABLE = {})", UCS_ERR_UNREACHABLE);
-                return ucs_status_to_ptr(UCS_ERR_UNREACHABLE);
+                ucs_status_to_ptr(UCS_ERR_UNREACHABLE)
             }
             2 => {
                 warn!(error_code = UCS_ERR_TIMED_OUT, "[FAULT] INJECTED: ucp_get_nbx timeout error (UCS_ERR_TIMED_OUT = {})", UCS_ERR_TIMED_OUT);
-                return ucs_status_to_ptr(UCS_ERR_TIMED_OUT);
+                ucs_status_to_ptr(UCS_ERR_TIMED_OUT)
             }
             _ => {
-                // This case shouldn't happen, but return success
+                // This case shouldn't happen, continue with normal execution
+                std::ptr::null_mut()
             }
+        };
+
+        if scenario <= 2 {
+            // Clear reentrancy guard before returning fault result
+            IN_INTERCEPT.with(|flag| {
+                *flag.borrow_mut() = false;
+            });
+            return fault_result;
         }
     }
 
@@ -574,7 +604,7 @@ pub extern "C" fn ucp_get_nbx(
         }
     }
 
-    if !real_fn_ptr.is_null() {
+    let result = if !real_fn_ptr.is_null() {
         // Cast to function pointer and call
         let real_fn: extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr =
             unsafe { std::mem::transmute(real_fn_ptr) };
@@ -591,5 +621,12 @@ pub extern "C" fn ucp_get_nbx(
         // Can't find real function - pass through with success (null pointer = UCS_OK)
         warn!(call_num, "real ucp_get_nbx not found, returning success to avoid hang");
         std::ptr::null_mut() // UCS_OK represented as null pointer
-    }
+    };
+
+    // Clear reentrancy guard before returning
+    IN_INTERCEPT.with(|flag| {
+        *flag.borrow_mut() = false;
+    });
+
+    result
 }
