@@ -168,20 +168,41 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!("RTLD_DEFAULT failed, trying to load UCX libraries directly");
-            // Try to find UCX libraries by name patterns
-            let ucx_lib_names = [
-                "libucp.so",
-                "libucp.so.0",
-                "/usr/lib64/libucp.so",
-                "/usr/local/lib/libucp.so",
-                "/opt/ucx/lib/libucp.so",
-                "libucp.dylib", // macOS
-            ];
+            info!("RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
+
+            // First, try to find where UCX is already loaded by reading /proc/self/maps
+            let mut ucx_lib_paths = Vec::new();
+            if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+                for line in maps.lines() {
+                    if line.contains("libucp") {
+                        // Extract the library path from the maps line
+                        if let Some(path_start) = line.rfind(' ') {
+                            let path = &line[path_start + 1..];
+                            if path.starts_with('/') && !ucx_lib_paths.contains(&path.to_string()) {
+                                ucx_lib_paths.push(path.to_string());
+                                info!("Found UCX library in memory map: {}", path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add the found paths to our search list
+            let mut ucx_lib_names = ucx_lib_paths;
+
+            // Also try standard locations as fallback
+            ucx_lib_names.extend([
+                "libucp.so".to_string(),
+                "libucp.so.0".to_string(),
+                "/usr/lib64/libucp.so".to_string(),
+                "/usr/local/lib/libucp.so".to_string(),
+                "/opt/ucx/lib/libucp.so".to_string(),
+                "libucp.dylib".to_string(), // macOS
+            ]);
 
             for lib_name in &ucx_lib_names {
                 info!("Trying to load library: {}", lib_name);
-                let lib_name_c = CString::new(*lib_name).unwrap();
+                let lib_name_c = CString::new(lib_name.as_str()).unwrap();
                 let handle = libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_LAZY);
                 if !handle.is_null() {
                     info!(lib_name, "successfully loaded library");
