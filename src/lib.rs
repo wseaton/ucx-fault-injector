@@ -609,23 +609,16 @@ pub extern "C" fn ucp_get_nbx(
         let real_fn: extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr =
             unsafe { std::mem::transmute(real_fn_ptr) };
 
-        if DEBUG_ENABLED.load(Ordering::Relaxed) {
-            debug!(address = ?real_fn_ptr, "calling real ucp_get_nbx function");
-        }
+        info!(call_num, address = ?real_fn_ptr, "calling real ucp_get_nbx function");
         let result = real_fn(ep, buffer, count, remote_addr, rkey, param);
-        if DEBUG_ENABLED.load(Ordering::Relaxed) {
-            debug!(result = ?result, "real ucp_get_nbx returned");
+        info!(call_num, result = ?result, result_int = result as isize, "real ucp_get_nbx returned");
 
-            // Log raw bytes for external analysis
-            if !result.is_null() || result as isize >= 0 {
-                // Transfer likely succeeded, dump first 256 bytes as hex
-                if count > 0 && !buffer.is_null() {
-                    let dump_size = std::cmp::min(count, 256);
-                    let buffer_slice = unsafe { std::slice::from_raw_parts(buffer as *const u8, dump_size) };
-                    let hex_string: String = buffer_slice.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
-                    info!("KV_HEXDUMP call_{} size_{} data_{}", call_num, count, hex_string);
-                }
-            }
+        // Always log raw bytes for external analysis on first few calls
+        if call_num < 10 && count > 0 && !buffer.is_null() {
+            let dump_size = std::cmp::min(count, 256);
+            let buffer_slice = unsafe { std::slice::from_raw_parts(buffer as *const u8, dump_size) };
+            let hex_string: String = buffer_slice.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+            info!("KV_HEXDUMP call_{} size_{} data_{}", call_num, count, hex_string);
         }
         result
     } else {
