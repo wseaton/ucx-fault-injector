@@ -613,13 +613,7 @@ pub extern "C" fn ucp_get_nbx(
         let result = real_fn(ep, buffer, count, remote_addr, rkey, param);
         info!(call_num, result = ?result, result_int = result as isize, "real ucp_get_nbx returned");
 
-        // Always log raw bytes for external analysis on first few calls
-        if call_num < 10 && count > 0 && !buffer.is_null() {
-            let dump_size = std::cmp::min(count, 256);
-            let buffer_slice = unsafe { std::slice::from_raw_parts(buffer as *const u8, dump_size) };
-            let hex_string: String = buffer_slice.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
-            info!("KV_HEXDUMP call_{} size_{} data_{}", call_num, count, hex_string);
-        }
+        // Skip buffer access for now to avoid segfault - UCX operations are async
         result
     } else {
         // Can't find real function - return error since we can't perform the operation
