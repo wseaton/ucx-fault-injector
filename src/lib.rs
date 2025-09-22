@@ -6,8 +6,6 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use nix::fcntl::{flock, FlockArg};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::io::{BufRead, BufReader, Write};
 use std::thread;
 use serde::{Deserialize, Serialize};
 
@@ -306,77 +304,50 @@ fn handle_command(cmd: Command) -> Response {
     }
 }
 
-fn handle_client(stream: UnixStream) {
-    let mut reader = BufReader::new(&stream);
-    let mut writer = &stream;
-
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                if DEBUG_ENABLED.load(Ordering::Relaxed) {
-                    eprintln!("[SOCKET] Received command: {}", line.trim());
-                }
-
-                let response = match serde_json::from_str::<Command>(line.trim()) {
-                    Ok(cmd) => handle_command(cmd),
-                    Err(e) => Response {
-                        status: "error".to_string(),
-                        message: format!("Invalid JSON: {}", e),
-                        state: None,
-                    }
-                };
-
-                if let Ok(response_json) = serde_json::to_string(&response) {
-                    if let Err(e) = writeln!(writer, "{}", response_json) {
-                        eprintln!("[SOCKET] Error writing response: {}", e);
-                        break;
-                    }
-                } else {
-                    eprintln!("[SOCKET] Error serializing response");
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("[SOCKET] Error reading from client: {}", e);
-                break;
-            }
-        }
-    }
-}
-
-fn start_socket_server(socket_path: String) {
+fn start_zmq_subscriber() {
     thread::spawn(move || {
-        // Remove existing socket file if it exists
-        let _ = std::fs::remove_file(&socket_path);
+        let ctx = zmq::Context::new();
+        let subscriber = ctx.socket(zmq::SUB).unwrap();
 
-        match UnixListener::bind(&socket_path) {
-            Ok(listener) => {
-                eprintln!("[SOCKET] UCX Fault Injector socket server listening on: {}", socket_path);
+        // Connect to the broadcast port
+        let broadcast_addr = "tcp://127.0.0.1:15559";
+        if let Err(e) = subscriber.connect(broadcast_addr) {
+            eprintln!("[ZMQ] Failed to connect to {}: {}", broadcast_addr, e);
+            return;
+        }
 
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(stream) => {
-                            if DEBUG_ENABLED.load(Ordering::Relaxed) {
-                                eprintln!("[SOCKET] New client connected");
-                            }
-                            thread::spawn(move || {
-                                handle_client(stream);
-                            });
+        // Subscribe to all messages
+        subscriber.set_subscribe(b"").unwrap();
+
+        eprintln!("[ZMQ] Subscriber listening on {} for PID {}", broadcast_addr, std::process::id());
+
+        loop {
+            match subscriber.recv_string(0) {
+                Ok(Ok(msg)) => {
+                    eprintln!("[ZMQ] PID {} received message: {}", std::process::id(), msg);
+
+                    match serde_json::from_str::<Command>(&msg) {
+                        Ok(cmd) => {
+                            let response = handle_command(cmd);
+                            eprintln!("[ZMQ] PID {} processed command: {}", std::process::id(), response.message);
                         }
                         Err(e) => {
-                            eprintln!("[SOCKET] Error accepting connection: {}", e);
+                            eprintln!("[ZMQ] Invalid JSON: {}", e);
                         }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!("[SOCKET] Error binding to socket {}: {}", socket_path, e);
+                Ok(Err(e)) => {
+                    eprintln!("[ZMQ] UTF-8 decode error: {:?}", e);
+                }
+                Err(e) => {
+                    eprintln!("[ZMQ] Receive error: {}", e);
+                    break;
+                }
             }
         }
     });
 }
+
 
 // initialize socket server
 #[ctor::ctor]
@@ -402,16 +373,12 @@ fn init_fault_injector() {
     FAULT_PROBABILITY.store(10, Ordering::Relaxed);
     eprintln!("[INIT] Default fault probability set to 10%");
 
-    // create socket path using session ID
-    let session_id = unsafe { libc::getsid(0) };
-    let socket_path = format!("/tmp/ucx-fault-injector-session-{}.sock", session_id);
+    // start ZMQ subscriber
+    eprintln!("[INIT] Starting ZMQ subscriber...");
+    start_zmq_subscriber();
+    eprintln!("[INIT] ZMQ subscriber started on tcp://127.0.0.1:15559");
 
-    // start socket server
-    eprintln!("[INIT] Starting socket server...");
-    start_socket_server(socket_path.clone());
-    eprintln!("[INIT] Socket server started at: {}", socket_path);
-
-    eprintln!("[INIT] Socket API commands:");
+    eprintln!("[INIT] ZMQ broadcast commands:");
     eprintln!("[INIT]   {{\"command\": \"toggle\"}} - toggle fault injection");
     eprintln!("[INIT]   {{\"command\": \"set_scenario\", \"scenario\": 0|1|2}} - set fault scenario");
     eprintln!("[INIT]   {{\"command\": \"set_probability\", \"value\": 0-100}} - set fault probability");
@@ -465,12 +432,26 @@ fn print_library_debug_info() {
 
 // helper function to decide fault injection
 fn should_inject_fault() -> bool {
-    if !FAULT_ENABLED.load(Ordering::Relaxed) {
-        return false;
+    // Check control file for real-time settings
+    let control_file = "/tmp/ucx-fault-control";
+
+    let contents = match std::fs::read_to_string(control_file) {
+        Ok(content) => content,
+        Err(_) => return false, // No control file = no faults
+    };
+
+    let mut enabled = false;
+    let mut probability = 0u32;
+
+    for line in contents.lines() {
+        if line.starts_with("enabled=") {
+            enabled = line.split('=').nth(1).unwrap_or("0") == "1";
+        } else if line.starts_with("probability=") {
+            probability = line.split('=').nth(1).unwrap_or("0").parse().unwrap_or(0);
+        }
     }
 
-    let probability = FAULT_PROBABILITY.load(Ordering::Relaxed);
-    if probability == 0 {
+    if !enabled || probability == 0 {
         return false;
     }
 
@@ -496,13 +477,32 @@ pub extern "C" fn ucp_get_nbx(
     rkey: UcpRkeyH,
     param: UcpRequestParamT,
 ) -> UcsStatusPtr {
-    if DEBUG_ENABLED.load(Ordering::Relaxed) {
-        eprintln!("[HOOK] ucp_get_nbx called - ep: {:p}, buffer: {:p}, count: {}, remote_addr: 0x{:x}, rkey: {:p}, param: {:p}",
-                 ep, buffer, count, remote_addr, rkey, param);
+    // Always log the first few calls to verify hook is working
+    static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
+        eprintln!("[HOOK] ucp_get_nbx called #{} - ep: {:p}, buffer: {:p}, count: {}, remote_addr: 0x{:x}, rkey: {:p}, param: {:p}",
+                 call_num, ep, buffer, count, remote_addr, rkey, param);
+        eprintln!("[HOOK] Fault state: enabled={}, scenario={}, probability={}%",
+                 FAULT_ENABLED.load(Ordering::Relaxed),
+                 FAULT_SCENARIO.load(Ordering::Relaxed),
+                 FAULT_PROBABILITY.load(Ordering::Relaxed));
     }
 
     if should_inject_fault() {
-        let scenario = FAULT_SCENARIO.load(Ordering::Relaxed);
+        // Read scenario from control file
+        let control_file = "/tmp/ucx-fault-control";
+        let mut scenario = 0u32;
+
+        if let Ok(contents) = std::fs::read_to_string(control_file) {
+            for line in contents.lines() {
+                if line.starts_with("scenario=") {
+                    scenario = line.split('=').nth(1).unwrap_or("0").parse().unwrap_or(0);
+                    break;
+                }
+            }
+        }
         match scenario {
             0 => {
                 eprintln!("[FAULT] INJECTED: ucp_get_nbx network/IO error (UCS_ERR_IO_ERROR = -3)");
