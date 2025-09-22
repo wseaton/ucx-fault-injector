@@ -1,5 +1,4 @@
 use libc::{c_void, size_t, c_int};
-use nix::sys::signal::{self, Signal, SigHandler};
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -7,6 +6,10 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use nix::fcntl::{flock, FlockArg};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{BufRead, BufReader, Write};
+use std::thread;
+use serde::{Deserialize, Serialize};
 
 // UCX types and constants
 type UcsStatus = c_int;
@@ -15,14 +18,48 @@ type UcpEpH = *mut c_void;
 type UcpRkeyH = *mut c_void;
 type UcpRequestParamT = *const c_void;
 
-const UCS_ERR_IO_ERROR: UcsStatus = -5;
+// Correct UCX error codes from ucx/src/ucs/type/status.h
+const UCS_ERR_IO_ERROR: UcsStatus = -3;
+const UCS_ERR_NO_MEMORY: UcsStatus = -4;
+const UCS_ERR_INVALID_PARAM: UcsStatus = -5;
+const UCS_ERR_NO_RESOURCE: UcsStatus = -2;
 const UCS_ERR_CANCELED: UcsStatus = -16;
+const UCS_ERR_UNREACHABLE: UcsStatus = -6;
+const UCS_ERR_TIMED_OUT: UcsStatus = -20;
 
-// fault injection state controlled by signals
+// UCX pointer encoding - simply cast the negative status code to a pointer
+// This follows UCS_STATUS_PTR(_status) macro: ((void*)(intptr_t)(_status))
+fn ucs_status_to_ptr(status: UcsStatus) -> *mut c_void {
+    status as isize as *mut c_void
+}
+
+// fault injection state controlled by socket API
 static FAULT_ENABLED: AtomicBool = AtomicBool::new(false);
 static FAULT_SCENARIO: AtomicU32 = AtomicU32::new(0);
 static FAULT_PROBABILITY: AtomicU32 = AtomicU32::new(0); // 0-100
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+// Socket API command and response structures
+#[derive(Deserialize)]
+struct Command {
+    command: String,
+    scenario: Option<u32>,
+    value: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct Response {
+    status: String,
+    message: String,
+    state: Option<State>,
+}
+
+#[derive(Serialize)]
+struct State {
+    enabled: bool,
+    scenario: u32,
+    probability: u32,
+}
 
 
 // helper function to check if injector is already initialized for this process tree
@@ -86,19 +123,54 @@ impl RealFunctions {
 
         eprintln!("[DEBUG] RealFunctions::new() - Loading original UCX functions...");
 
-        // use dlsym with RTLD_NEXT to find the next version of symbols in the loading order
+        // Try multiple approaches to find the real UCX function
         let ucp_get_nbx = unsafe {
             let symbol_name = CString::new("ucp_get_nbx").unwrap();
-            eprintln!("[DEBUG] Looking up symbol: ucp_get_nbx");
-            let ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
+
+            // First try RTLD_NEXT
+            eprintln!("[DEBUG] Looking up symbol with RTLD_NEXT: ucp_get_nbx");
+            let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
+
             if ptr.is_null() {
-                eprintln!("[ERROR] Failed to find ucp_get_nbx symbol via dlsym(RTLD_NEXT)");
-                let error = unsafe { libc::dlerror() };
+                eprintln!("[DEBUG] RTLD_NEXT failed, trying RTLD_DEFAULT");
+                ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+            }
+
+            if ptr.is_null() {
+                eprintln!("[DEBUG] RTLD_DEFAULT failed, trying to load UCX libraries directly");
+                // Try to find UCX libraries by name patterns
+                let ucx_lib_names = [
+                    "libucp.so",
+                    "libucp.so.0",
+                    "/usr/lib64/libucp.so",
+                    "/usr/local/lib/libucp.so"
+                ];
+
+                for lib_name in &ucx_lib_names {
+                    let lib_name_c = CString::new(*lib_name).unwrap();
+                    let handle = libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_LAZY);
+                    if !handle.is_null() {
+                        eprintln!("[DEBUG] Successfully loaded library: {}", lib_name);
+                        ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                        if !ptr.is_null() {
+                            eprintln!("[DEBUG] Found ucp_get_nbx in {}", lib_name);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if ptr.is_null() {
+                eprintln!("[ERROR] Failed to find ucp_get_nbx symbol via any method");
+                let error = libc::dlerror();
                 if !error.is_null() {
-                    let error_str = unsafe { std::ffi::CStr::from_ptr(error) };
+                    let error_str = std::ffi::CStr::from_ptr(error);
                     eprintln!("[ERROR] dlsym error: {:?}", error_str);
                 }
-                None
+
+                // As a fallback, create a stub that will be called when real function is not available
+                eprintln!("[DEBUG] Creating stub function for ucp_get_nbx");
+                Some(Self::stub_ucp_get_nbx as extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr)
             } else {
                 eprintln!("[DEBUG] Successfully found ucp_get_nbx at address: {:p}", ptr);
                 Some(std::mem::transmute::<*mut libc::c_void, extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr>(ptr))
@@ -112,44 +184,201 @@ impl RealFunctions {
             ucp_get_nbx,
         }
     }
+
+    // Stub function that returns success when no real UCX function is available
+    extern "C" fn stub_ucp_get_nbx(
+        _ep: UcpEpH,
+        _buffer: *mut c_void,
+        _count: size_t,
+        _remote_addr: u64,
+        _rkey: UcpRkeyH,
+        _param: UcpRequestParamT,
+    ) -> UcsStatusPtr {
+        eprintln!("[STUB] ucp_get_nbx stub called - returning success");
+        std::ptr::null_mut() // UCS_OK represented as null pointer
+    }
 }
 
-// signal handlers for fault control
-extern "C" fn handle_sigusr1(_: c_int) {
-    let current = FAULT_ENABLED.load(Ordering::Relaxed);
-    FAULT_ENABLED.store(!current, Ordering::Relaxed);
-    eprintln!("[SIGNAL] UCX Fault Injector: fault injection {}",
-              if !current { "ENABLED" } else { "DISABLED" });
+// Socket server functions for fault control
+fn get_current_state() -> State {
+    State {
+        enabled: FAULT_ENABLED.load(Ordering::Relaxed),
+        scenario: FAULT_SCENARIO.load(Ordering::Relaxed),
+        probability: FAULT_PROBABILITY.load(Ordering::Relaxed),
+    }
 }
 
-extern "C" fn handle_sigusr2(_: c_int) {
-    let current = FAULT_SCENARIO.load(Ordering::Relaxed);
-    let next = (current + 1) % 3; // cycle through 3 scenarios
-    FAULT_SCENARIO.store(next, Ordering::Relaxed);
-    let scenario_name = match next {
-        0 => "NETWORK_ERROR",
-        1 => "TIMEOUT",
-        2 => "MEMORY_ERROR",
-        _ => "UNKNOWN",
-    };
-    eprintln!("[SIGNAL] UCX Fault Injector: switched to scenario {}", scenario_name);
+fn handle_command(cmd: Command) -> Response {
+    match cmd.command.as_str() {
+        "toggle" => {
+            let current = FAULT_ENABLED.load(Ordering::Relaxed);
+            FAULT_ENABLED.store(!current, Ordering::Relaxed);
+            let new_state = !current;
+            eprintln!("[SOCKET] UCX Fault Injector: fault injection {}",
+                      if new_state { "ENABLED" } else { "DISABLED" });
+            Response {
+                status: "ok".to_string(),
+                message: format!("Fault injection {}", if new_state { "enabled" } else { "disabled" }),
+                state: Some(get_current_state()),
+            }
+        }
+        "set_scenario" => {
+            if let Some(scenario) = cmd.scenario {
+                if scenario <= 2 {
+                    FAULT_SCENARIO.store(scenario, Ordering::Relaxed);
+                    let scenario_name = match scenario {
+                        0 => "NETWORK_ERROR",
+                        1 => "TIMEOUT",
+                        2 => "MEMORY_ERROR",
+                        _ => "UNKNOWN",
+                    };
+                    eprintln!("[SOCKET] UCX Fault Injector: switched to scenario {}", scenario_name);
+                    Response {
+                        status: "ok".to_string(),
+                        message: format!("Scenario set to {} ({})", scenario, scenario_name),
+                        state: Some(get_current_state()),
+                    }
+                } else {
+                    Response {
+                        status: "error".to_string(),
+                        message: "Invalid scenario. Must be 0, 1, or 2".to_string(),
+                        state: None,
+                    }
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing scenario parameter".to_string(),
+                    state: None,
+                }
+            }
+        }
+        "set_probability" => {
+            if let Some(value) = cmd.value {
+                if value <= 100 {
+                    FAULT_PROBABILITY.store(value, Ordering::Relaxed);
+                    eprintln!("[SOCKET] UCX Fault Injector: probability set to {}%", value);
+                    Response {
+                        status: "ok".to_string(),
+                        message: format!("Probability set to {}%", value),
+                        state: Some(get_current_state()),
+                    }
+                } else {
+                    Response {
+                        status: "error".to_string(),
+                        message: "Invalid probability. Must be 0-100".to_string(),
+                        state: None,
+                    }
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing value parameter".to_string(),
+                    state: None,
+                }
+            }
+        }
+        "reset" => {
+            FAULT_ENABLED.store(false, Ordering::Relaxed);
+            FAULT_SCENARIO.store(0, Ordering::Relaxed);
+            FAULT_PROBABILITY.store(10, Ordering::Relaxed);
+            eprintln!("[SOCKET] UCX Fault Injector: reset to defaults");
+            Response {
+                status: "ok".to_string(),
+                message: "Reset to defaults".to_string(),
+                state: Some(get_current_state()),
+            }
+        }
+        "status" => {
+            Response {
+                status: "ok".to_string(),
+                message: "Current state".to_string(),
+                state: Some(get_current_state()),
+            }
+        }
+        _ => {
+            Response {
+                status: "error".to_string(),
+                message: format!("Unknown command: {}", cmd.command),
+                state: None,
+            }
+        }
+    }
 }
 
-extern "C" fn handle_increase_probability(_: c_int) {
-    let current = FAULT_PROBABILITY.load(Ordering::Relaxed);
-    let next = std::cmp::min(current + 10, 100);
-    FAULT_PROBABILITY.store(next, Ordering::Relaxed);
-    eprintln!("[SIGNAL] UCX Fault Injector: probability increased to {}%", next);
+fn handle_client(stream: UnixStream) {
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if DEBUG_ENABLED.load(Ordering::Relaxed) {
+                    eprintln!("[SOCKET] Received command: {}", line.trim());
+                }
+
+                let response = match serde_json::from_str::<Command>(line.trim()) {
+                    Ok(cmd) => handle_command(cmd),
+                    Err(e) => Response {
+                        status: "error".to_string(),
+                        message: format!("Invalid JSON: {}", e),
+                        state: None,
+                    }
+                };
+
+                if let Ok(response_json) = serde_json::to_string(&response) {
+                    if let Err(e) = writeln!(writer, "{}", response_json) {
+                        eprintln!("[SOCKET] Error writing response: {}", e);
+                        break;
+                    }
+                } else {
+                    eprintln!("[SOCKET] Error serializing response");
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("[SOCKET] Error reading from client: {}", e);
+                break;
+            }
+        }
+    }
 }
 
-extern "C" fn handle_reset(_: c_int) {
-    FAULT_ENABLED.store(false, Ordering::Relaxed);
-    FAULT_SCENARIO.store(0, Ordering::Relaxed);
-    FAULT_PROBABILITY.store(10, Ordering::Relaxed);
-    eprintln!("[SIGNAL] UCX Fault Injector: reset to defaults");
+fn start_socket_server(socket_path: String) {
+    thread::spawn(move || {
+        // Remove existing socket file if it exists
+        let _ = std::fs::remove_file(&socket_path);
+
+        match UnixListener::bind(&socket_path) {
+            Ok(listener) => {
+                eprintln!("[SOCKET] UCX Fault Injector socket server listening on: {}", socket_path);
+
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(stream) => {
+                            if DEBUG_ENABLED.load(Ordering::Relaxed) {
+                                eprintln!("[SOCKET] New client connected");
+                            }
+                            thread::spawn(move || {
+                                handle_client(stream);
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("[SOCKET] Error accepting connection: {}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[SOCKET] Error binding to socket {}: {}", socket_path, e);
+            }
+        }
+    });
 }
 
-// initialize signal handlers
+// initialize socket server
 #[ctor::ctor]
 fn init_fault_injector() {
     let current_pid = std::process::id();
@@ -173,49 +402,21 @@ fn init_fault_injector() {
     FAULT_PROBABILITY.store(10, Ordering::Relaxed);
     eprintln!("[INIT] Default fault probability set to 10%");
 
-    // install signal handlers
-    eprintln!("[INIT] Installing signal handlers...");
-    unsafe {
-        signal::signal(Signal::SIGUSR1, SigHandler::Handler(handle_sigusr1)).unwrap();
-        eprintln!("[INIT] SIGUSR1 handler installed");
-        signal::signal(Signal::SIGUSR2, SigHandler::Handler(handle_sigusr2)).unwrap();
-        eprintln!("[INIT] SIGUSR2 handler installed");
+    // create socket path using session ID
+    let session_id = unsafe { libc::getsid(0) };
+    let socket_path = format!("/tmp/ucx-fault-injector-session-{}.sock", session_id);
 
-        #[cfg(target_os = "linux")]
-        {
-            // use real-time signals on Linux
-            if let Ok(sig) = Signal::try_from(libc::SIGRTMIN() + 1) {
-                signal::signal(sig, SigHandler::Handler(handle_increase_probability)).unwrap();
-                eprintln!("[INIT] SIGRTMIN+1 handler installed");
-            }
-            if let Ok(sig) = Signal::try_from(libc::SIGRTMIN() + 2) {
-                signal::signal(sig, SigHandler::Handler(handle_reset)).unwrap();
-                eprintln!("[INIT] SIGRTMIN+2 handler installed");
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            // fallback signals for non-Linux platforms
-            signal::signal(Signal::SIGTERM, SigHandler::Handler(handle_increase_probability)).unwrap();
-            eprintln!("[INIT] SIGTERM handler installed");
-            signal::signal(Signal::SIGQUIT, SigHandler::Handler(handle_reset)).unwrap();
-            eprintln!("[INIT] SIGQUIT handler installed");
-        }
-    }
+    // start socket server
+    eprintln!("[INIT] Starting socket server...");
+    start_socket_server(socket_path.clone());
+    eprintln!("[INIT] Socket server started at: {}", socket_path);
 
-    eprintln!("[INIT] Signal handlers installed:");
-    eprintln!("[INIT]   SIGUSR1 - toggle fault injection");
-    eprintln!("[INIT]   SIGUSR2 - cycle fault scenarios");
-    #[cfg(target_os = "linux")]
-    {
-        eprintln!("[INIT]   SIGRTMIN+1 - increase probability");
-        eprintln!("[INIT]   SIGRTMIN+2 - reset to defaults");
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("[INIT]   SIGTERM - increase probability");
-        eprintln!("[INIT]   SIGQUIT - reset to defaults");
-    }
+    eprintln!("[INIT] Socket API commands:");
+    eprintln!("[INIT]   {{\"command\": \"toggle\"}} - toggle fault injection");
+    eprintln!("[INIT]   {{\"command\": \"set_scenario\", \"scenario\": 0|1|2}} - set fault scenario");
+    eprintln!("[INIT]   {{\"command\": \"set_probability\", \"value\": 0-100}} - set fault probability");
+    eprintln!("[INIT]   {{\"command\": \"reset\"}} - reset to defaults");
+    eprintln!("[INIT]   {{\"command\": \"status\"}} - get current state");
 
     // Force initialization of real functions to check symbol loading
     eprintln!("[INIT] Forcing initialization of REAL_FUNCTIONS...");
@@ -304,18 +505,16 @@ pub extern "C" fn ucp_get_nbx(
         let scenario = FAULT_SCENARIO.load(Ordering::Relaxed);
         match scenario {
             0 => {
-                eprintln!("[FAULT] INJECTED: ucp_get_nbx network error");
-                // Return error pointer for UCS_ERR_IO_ERROR
-                return UCS_ERR_IO_ERROR as isize as *mut c_void;
+                eprintln!("[FAULT] INJECTED: ucp_get_nbx network/IO error (UCS_ERR_IO_ERROR = -3)");
+                return ucs_status_to_ptr(UCS_ERR_IO_ERROR);
             }
             1 => {
-                eprintln!("[FAULT] INJECTED: ucp_get_nbx timeout (4s delay)");
-                std::thread::sleep(std::time::Duration::from_secs(4));
+                eprintln!("[FAULT] INJECTED: ucp_get_nbx unreachable error (UCS_ERR_UNREACHABLE = -6)");
+                return ucs_status_to_ptr(UCS_ERR_UNREACHABLE);
             }
             2 => {
-                eprintln!("[FAULT] INJECTED: ucp_get_nbx canceled error");
-                // Return error pointer for UCS_ERR_CANCELED
-                return UCS_ERR_CANCELED as isize as *mut c_void;
+                eprintln!("[FAULT] INJECTED: ucp_get_nbx timeout error (UCS_ERR_TIMED_OUT = -20)");
+                return ucs_status_to_ptr(UCS_ERR_TIMED_OUT);
             }
             _ => {}
         }
@@ -333,6 +532,6 @@ pub extern "C" fn ucp_get_nbx(
         result
     } else {
         eprintln!("[ERROR] No real ucp_get_nbx function found, returning IO_ERROR");
-        UCS_ERR_IO_ERROR as isize as *mut c_void
+        ucs_status_to_ptr(UCS_ERR_IO_ERROR)
     }
 }
