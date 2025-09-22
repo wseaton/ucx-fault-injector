@@ -121,9 +121,9 @@ fn is_already_initialized() -> bool {
     }
 }
 
-// function pointers to real UCX functions
-static REAL_FUNCTIONS: Lazy<Mutex<RealFunctions>> = Lazy::new(|| {
-    Mutex::new(RealFunctions::new())
+// function pointers to real UCX functions - use atomic pointer to avoid deadlock
+static REAL_UCP_GET_NBX: Lazy<std::sync::atomic::AtomicPtr<c_void>> = Lazy::new(|| {
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())
 });
 
 struct RealFunctions {
@@ -131,70 +131,72 @@ struct RealFunctions {
     ucp_get_nbx: Option<extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr>,
 }
 
-impl RealFunctions {
-    fn new() -> Self {
-        use std::ffi::CString;
+fn init_real_ucp_get_nbx() {
+    use std::ffi::CString;
 
-        debug!("loading original UCX functions");
+    debug!("loading original UCX functions");
 
-        // Try multiple approaches to find the real UCX function
-        let ucp_get_nbx = unsafe {
-            let symbol_name = CString::new("ucp_get_nbx").unwrap();
+    // Try multiple approaches to find the real UCX function
+    let ptr = unsafe {
+        let symbol_name = CString::new("ucp_get_nbx").unwrap();
 
-            // First try RTLD_NEXT
-            debug!("looking up symbol with RTLD_NEXT: ucp_get_nbx");
-            let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
+        // First try RTLD_NEXT
+        debug!("looking up symbol with RTLD_NEXT: ucp_get_nbx");
+        let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
 
-            if ptr.is_null() {
-                debug!("RTLD_NEXT failed, trying RTLD_DEFAULT");
-                ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-            }
+        if ptr.is_null() {
+            debug!("RTLD_NEXT failed, trying RTLD_DEFAULT");
+            ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+        }
 
-            if ptr.is_null() {
-                debug!("RTLD_DEFAULT failed, trying to load UCX libraries directly");
-                // Try to find UCX libraries by name patterns
-                let ucx_lib_names = [
-                    "libucp.so",
-                    "libucp.so.0",
-                    "/usr/lib64/libucp.so",
-                    "/usr/local/lib/libucp.so"
-                ];
+        if ptr.is_null() {
+            debug!("RTLD_DEFAULT failed, trying to load UCX libraries directly");
+            // Try to find UCX libraries by name patterns
+            let ucx_lib_names = [
+                "libucp.so",
+                "libucp.so.0",
+                "/usr/lib64/libucp.so",
+                "/usr/local/lib/libucp.so"
+            ];
 
-                for lib_name in &ucx_lib_names {
-                    let lib_name_c = CString::new(*lib_name).unwrap();
-                    let handle = libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_LAZY);
-                    if !handle.is_null() {
-                        debug!(lib_name, "successfully loaded library");
-                        ptr = libc::dlsym(handle, symbol_name.as_ptr());
-                        if !ptr.is_null() {
-                            debug!(lib_name, "found ucp_get_nbx");
-                            break;
-                        }
+            for lib_name in &ucx_lib_names {
+                let lib_name_c = CString::new(*lib_name).unwrap();
+                let handle = libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_LAZY);
+                if !handle.is_null() {
+                    debug!(lib_name, "successfully loaded library");
+                    ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                    if !ptr.is_null() {
+                        debug!(lib_name, "found ucp_get_nbx");
+                        break;
                     }
                 }
             }
+        }
 
-            if ptr.is_null() {
-                error!("failed to find ucp_get_nbx symbol via any method");
-                let error = libc::dlerror();
-                if !error.is_null() {
-                    let error_str = std::ffi::CStr::from_ptr(error);
-                    error!(error = ?error_str, "dlsym error");
-                }
-
-                // As a fallback, create a stub that will be called when real function is not available
-                debug!("creating stub function for ucp_get_nbx");
-                Some(Self::stub_ucp_get_nbx as extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr)
-            } else {
-                debug!(address = ?ptr, "successfully found ucp_get_nbx");
-                Some(std::mem::transmute::<*mut libc::c_void, extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr>(ptr))
+        if ptr.is_null() {
+            error!("failed to find ucp_get_nbx symbol via any method");
+            let error = libc::dlerror();
+            if !error.is_null() {
+                let error_str = std::ffi::CStr::from_ptr(error);
+                error!(error = ?error_str, "dlsym error");
             }
-        };
+        } else {
+            debug!(address = ?ptr, "successfully found ucp_get_nbx");
+        }
 
-        debug!(ucp_get_nbx_available = ucp_get_nbx.is_some(), "RealFunctions initialized");
+        ptr
+    };
 
+    // Store the function pointer atomically
+    REAL_UCP_GET_NBX.store(ptr, std::sync::atomic::Ordering::Relaxed);
+    debug!(ptr_loaded = !ptr.is_null(), "real UCX function pointer stored");
+}
+
+impl RealFunctions {
+    fn new() -> Self {
+        // This is kept for backward compatibility but won't be used
         Self {
-            ucp_get_nbx,
+            ucp_get_nbx: None,
         }
     }
 
@@ -420,8 +422,8 @@ fn init_fault_injector() {
     info!("  {{\"command\": \"status\"}} - get current state");
 
     // Force initialization of real functions to check symbol loading
-    debug!("forcing initialization of REAL_FUNCTIONS");
-    let _ = &*REAL_FUNCTIONS;
+    debug!("initializing real UCX function pointer");
+    init_real_ucp_get_nbx();
 
     // Print detailed debug info if debug mode is enabled
     if DEBUG_ENABLED.load(Ordering::Relaxed) {
@@ -558,10 +560,16 @@ pub extern "C" fn ucp_get_nbx(
         }
     }
 
-    let real_funcs = REAL_FUNCTIONS.lock().unwrap();
-    if let Some(real_fn) = real_funcs.ucp_get_nbx {
+    // Get the real function pointer atomically - no mutex needed!
+    let real_fn_ptr = REAL_UCP_GET_NBX.load(std::sync::atomic::Ordering::Relaxed);
+
+    if !real_fn_ptr.is_null() {
+        // Cast to function pointer and call
+        let real_fn: extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr =
+            unsafe { std::mem::transmute(real_fn_ptr) };
+
         if DEBUG_ENABLED.load(Ordering::Relaxed) {
-            debug!(address = ?real_fn, "calling real ucp_get_nbx function");
+            debug!(address = ?real_fn_ptr, "calling real ucp_get_nbx function");
         }
         let result = real_fn(ep, buffer, count, remote_addr, rkey, param);
         if DEBUG_ENABLED.load(Ordering::Relaxed) {
