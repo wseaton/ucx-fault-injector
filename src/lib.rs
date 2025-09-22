@@ -168,7 +168,7 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            debug!("RTLD_DEFAULT failed, trying to load UCX libraries directly");
+            info!("RTLD_DEFAULT failed, trying to load UCX libraries directly");
             // Try to find UCX libraries by name patterns
             let ucx_lib_names = [
                 "libucp.so",
@@ -180,15 +180,26 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
             ];
 
             for lib_name in &ucx_lib_names {
+                info!("Trying to load library: {}", lib_name);
                 let lib_name_c = CString::new(*lib_name).unwrap();
                 let handle = libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_LAZY);
                 if !handle.is_null() {
-                    debug!(lib_name, "successfully loaded library");
+                    info!(lib_name, "successfully loaded library");
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() {
-                        debug!(lib_name, "found ucp_get_nbx");
+                        info!(lib_name, address = ?ptr, "found ucp_get_nbx");
                         break;
+                    } else {
+                        info!(lib_name, "library loaded but ucp_get_nbx not found");
                     }
+                } else {
+                    let error = libc::dlerror();
+                    let error_str = if !error.is_null() {
+                        std::ffi::CStr::from_ptr(error).to_string_lossy()
+                    } else {
+                        "unknown error".into()
+                    };
+                    info!(lib_name, error = %error_str, "failed to load library");
                 }
             }
         }
