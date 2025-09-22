@@ -1,15 +1,13 @@
 use libc::{c_void, size_t, c_int};
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{Flock, FlockArg};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use shared_memory::*;
-use tracing::{debug, error, info, warn, instrument};
+use tracing::{debug, error, info, warn};
 
 // UCX types and constants
 type UcsStatus = c_int;
@@ -20,10 +18,6 @@ type UcpRequestParamT = *const c_void;
 
 // Correct UCX error codes from ucx/src/ucs/type/status.h
 const UCS_ERR_IO_ERROR: UcsStatus = -3;
-const UCS_ERR_NO_MEMORY: UcsStatus = -4;
-const UCS_ERR_INVALID_PARAM: UcsStatus = -5;
-const UCS_ERR_NO_RESOURCE: UcsStatus = -2;
-const UCS_ERR_CANCELED: UcsStatus = -16;
 const UCS_ERR_UNREACHABLE: UcsStatus = -6;
 const UCS_ERR_TIMED_OUT: UcsStatus = -20;
 
@@ -33,76 +27,28 @@ fn ucs_status_to_ptr(status: UcsStatus) -> *mut c_void {
     status as isize as *mut c_void
 }
 
-// shared memory state structure
-#[repr(C)]
-struct SharedFaultState {
+// Local process state structure (no shared memory)
+struct LocalFaultState {
     enabled: AtomicBool,
     scenario: AtomicU32,
     probability: AtomicU32,
-    generation: AtomicU32, // for detecting changes
 }
 
-impl SharedFaultState {
+impl LocalFaultState {
     fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),
             scenario: AtomicU32::new(0),
-            probability: AtomicU32::new(10), // default 10%
-            generation: AtomicU32::new(0),
+            probability: AtomicU32::new(25), // default 25%
         }
     }
 }
 
-// shared memory handle
-static SHARED_STATE: Lazy<Shmem> = Lazy::new(|| {
-    let shmem_id = "ucx-fault-injector-state";
-    let size = std::mem::size_of::<SharedFaultState>();
-
-    // try to create new shared memory segment
-    match ShmemConf::new()
-        .size(size)
-        .os_id(shmem_id)
-        .create()
-    {
-        Ok(shmem) => {
-            info!(shmem_id, "created new shared memory segment");
-            // initialize the shared state
-            let state_ptr = shmem.as_ptr() as *mut SharedFaultState;
-            unsafe {
-                std::ptr::write(state_ptr, SharedFaultState::new());
-            }
-            shmem
-        }
-        Err(_) => {
-            // shared memory already exists, open it
-            match ShmemConf::new()
-                .os_id(shmem_id)
-                .open()
-            {
-                Ok(shmem) => {
-                    info!(shmem_id, "opened existing shared memory segment");
-                    shmem
-                }
-                Err(e) => {
-                    error!(error = %e, "failed to create or open shared memory");
-                    panic!("Cannot initialize shared memory");
-                }
-            }
-        }
-    }
+// Local process state (much safer than shared memory)
+static LOCAL_STATE: Lazy<LocalFaultState> = Lazy::new(|| {
+    info!("initializing local fault injection state");
+    LocalFaultState::new()
 });
-
-// helper to get shared state
-fn get_shared_state() -> &'static SharedFaultState {
-    let state_ptr = SHARED_STATE.as_ptr() as *const SharedFaultState;
-    unsafe { &*state_ptr }
-}
-
-// helper to get mutable shared state
-fn get_shared_state_mut() -> &'static SharedFaultState {
-    let state_ptr = SHARED_STATE.as_ptr() as *mut SharedFaultState;
-    unsafe { &*state_ptr }
-}
 
 // local debug state (not shared)
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -147,22 +93,22 @@ fn is_already_initialized() -> bool {
     {
         Ok(file) => {
             // Try to acquire exclusive lock (non-blocking)
-            match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
-                Ok(()) => {
+            match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+                Ok(locked_file) => {
                     // We got the lock, write our PID and keep the file open
                     use std::io::Write;
 
-                    if let Err(e) = writeln!(&file, "session_{}_pid_{}", session_id, current_pid) {
+                    if let Err(e) = writeln!(&*locked_file, "session_{}_pid_{}", session_id, current_pid) {
                         error!(error = %e, "failed to write session/PID to lock file");
                     }
 
                     // Store the file descriptor so we keep the lock
                     // In a real implementation, we'd store this somewhere static
                     // For now, we'll leak the file descriptor intentionally
-                    std::mem::forget(file);
+                    std::mem::forget(locked_file);
                     false // Not already initialized
                 }
-                Err(_) => {
+                Err((_, _)) => {
                     // Lock failed, someone else has it
                     true // Already initialized
                 }
@@ -268,23 +214,19 @@ impl RealFunctions {
 
 // Socket server functions for fault control
 fn get_current_state() -> State {
-    let shared = get_shared_state();
     State {
-        enabled: shared.enabled.load(Ordering::Relaxed),
-        scenario: shared.scenario.load(Ordering::Relaxed),
-        probability: shared.probability.load(Ordering::Relaxed),
+        enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
+        scenario: LOCAL_STATE.scenario.load(Ordering::Relaxed),
+        probability: LOCAL_STATE.probability.load(Ordering::Relaxed),
     }
 }
 
 fn handle_command(cmd: Command) -> Response {
-    let shared = get_shared_state_mut();
-
     match cmd.command.as_str() {
         "toggle" => {
-            let current = shared.enabled.load(Ordering::Relaxed);
+            let current = LOCAL_STATE.enabled.load(Ordering::Relaxed);
             let new_state = !current;
-            shared.enabled.store(new_state, Ordering::Relaxed);
-            shared.generation.fetch_add(1, Ordering::Relaxed);
+            LOCAL_STATE.enabled.store(new_state, Ordering::Relaxed);
             info!(enabled = new_state, "fault injection toggled");
             Response {
                 status: "ok".to_string(),
@@ -295,12 +237,11 @@ fn handle_command(cmd: Command) -> Response {
         "set_scenario" => {
             if let Some(scenario) = cmd.scenario {
                 if scenario <= 2 {
-                    shared.scenario.store(scenario, Ordering::Relaxed);
-                    shared.generation.fetch_add(1, Ordering::Relaxed);
+                    LOCAL_STATE.scenario.store(scenario, Ordering::Relaxed);
                     let scenario_name = match scenario {
                         0 => "NETWORK_ERROR",
-                        1 => "TIMEOUT",
-                        2 => "MEMORY_ERROR",
+                        1 => "UNREACHABLE_ERROR",
+                        2 => "TIMEOUT_ERROR",
                         _ => "UNKNOWN",
                     };
                     info!(scenario = scenario, scenario_name, "switched to scenario");
@@ -327,8 +268,7 @@ fn handle_command(cmd: Command) -> Response {
         "set_probability" => {
             if let Some(value) = cmd.value {
                 if value <= 100 {
-                    shared.probability.store(value, Ordering::Relaxed);
-                    shared.generation.fetch_add(1, Ordering::Relaxed);
+                    LOCAL_STATE.probability.store(value, Ordering::Relaxed);
                     info!(probability = value, "probability set");
                     Response {
                         status: "ok".to_string(),
@@ -351,10 +291,9 @@ fn handle_command(cmd: Command) -> Response {
             }
         }
         "reset" => {
-            shared.enabled.store(false, Ordering::Relaxed);
-            shared.scenario.store(0, Ordering::Relaxed);
-            shared.probability.store(10, Ordering::Relaxed);
-            shared.generation.fetch_add(1, Ordering::Relaxed);
+            LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
+            LOCAL_STATE.scenario.store(0, Ordering::Relaxed);
+            LOCAL_STATE.probability.store(10, Ordering::Relaxed);
             info!("reset to defaults");
             Response {
                 status: "ok".to_string(),
@@ -459,13 +398,13 @@ fn init_fault_injector() {
         info!("debug mode enabled via UCX_FAULT_DEBUG environment variable");
     }
 
-    // initialize shared state (will use defaults if new segment was created)
-    let shared = get_shared_state();
+    // initialize local state (much safer than shared memory)
+    let _ = &*LOCAL_STATE; // Force initialization
     info!(
-        enabled = shared.enabled.load(Ordering::Relaxed),
-        scenario = shared.scenario.load(Ordering::Relaxed),
-        probability = shared.probability.load(Ordering::Relaxed),
-        "shared memory state initialized"
+        enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed),
+        scenario = LOCAL_STATE.scenario.load(Ordering::Relaxed),
+        probability = LOCAL_STATE.probability.load(Ordering::Relaxed),
+        "local process state initialized"
     );
 
     // start ZMQ subscriber
@@ -525,12 +464,30 @@ fn print_library_debug_info() {
     debug!("=== end library debug information ===");
 }
 
-// helper function to decide fault injection using shared memory
+// helper function to decide fault injection using local state
 fn should_inject_fault() -> bool {
-    let shared = get_shared_state();
+    let enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed);
+    let probability = LOCAL_STATE.probability.load(Ordering::Relaxed);
 
-    let enabled = shared.enabled.load(Ordering::Relaxed);
-    let probability = shared.probability.load(Ordering::Relaxed);
+    if !enabled || probability == 0 {
+        return false;
+    }
+
+    // simple random check
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut hasher = DefaultHasher::new();
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
+    let random = (hasher.finish() % 100) as u32;
+
+    random < probability
+}
+
+// helper function to decide fault injection using pre-read state
+fn should_inject_fault_with_state(state: (bool, u32, u32)) -> bool {
+    let (enabled, _scenario, probability) = state;
 
     if !enabled || probability == 0 {
         return false;
@@ -562,41 +519,42 @@ pub extern "C" fn ucp_get_nbx(
     static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // Read current state once for both logging and fault injection
+    let current_state = (
+        LOCAL_STATE.enabled.load(Ordering::Relaxed),
+        LOCAL_STATE.scenario.load(Ordering::Relaxed),
+        LOCAL_STATE.probability.load(Ordering::Relaxed),
+    );
+
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
-        let shared = get_shared_state();
-        debug!(
-            call_num,
-            ep = ?ep,
-            buffer = ?buffer,
-            count,
-            remote_addr = format!("0x{:x}", remote_addr),
-            rkey = ?rkey,
-            param = ?param,
-            enabled = shared.enabled.load(Ordering::Relaxed),
-            scenario = shared.scenario.load(Ordering::Relaxed),
-            probability = shared.probability.load(Ordering::Relaxed),
-            "ucp_get_nbx called"
+        info!(
+            "ucp_get_nbx called #{} - ep: {:?}, buffer: {:?}, count: {}, remote_addr: 0x{:x}, rkey: {:?}, param: {:?}",
+            call_num, ep, buffer, count, remote_addr, rkey, param
+        );
+        info!(
+            "Fault state: enabled={}, scenario={}, probability={}%",
+            current_state.0, current_state.1, current_state.2
         );
     }
 
-    if should_inject_fault() {
-        let shared = get_shared_state();
-        let scenario = shared.scenario.load(Ordering::Relaxed);
-
+    if should_inject_fault_with_state(current_state) {
+        let scenario = current_state.1;
         match scenario {
             0 => {
-                warn!(error_code = UCS_ERR_IO_ERROR, "injecting network/IO error");
+                warn!(error_code = UCS_ERR_IO_ERROR, "[FAULT] INJECTED: ucp_get_nbx network/IO error (UCS_ERR_IO_ERROR = {})", UCS_ERR_IO_ERROR);
                 return ucs_status_to_ptr(UCS_ERR_IO_ERROR);
             }
             1 => {
-                warn!(error_code = UCS_ERR_UNREACHABLE, "injecting unreachable error");
+                warn!(error_code = UCS_ERR_UNREACHABLE, "[FAULT] INJECTED: ucp_get_nbx unreachable error (UCS_ERR_UNREACHABLE = {})", UCS_ERR_UNREACHABLE);
                 return ucs_status_to_ptr(UCS_ERR_UNREACHABLE);
             }
             2 => {
-                warn!(error_code = UCS_ERR_TIMED_OUT, "injecting timeout error");
+                warn!(error_code = UCS_ERR_TIMED_OUT, "[FAULT] INJECTED: ucp_get_nbx timeout error (UCS_ERR_TIMED_OUT = {})", UCS_ERR_TIMED_OUT);
                 return ucs_status_to_ptr(UCS_ERR_TIMED_OUT);
             }
-            _ => {}
+            _ => {
+                // This case shouldn't happen, but return success
+            }
         }
     }
 
