@@ -618,9 +618,9 @@ pub extern "C" fn ucp_get_nbx(
         }
         result
     } else {
-        // Can't find real function - pass through with success (null pointer = UCS_OK)
-        warn!(call_num, "real ucp_get_nbx not found, returning success to avoid hang");
-        std::ptr::null_mut() // UCS_OK represented as null pointer
+        // Can't find real function - return error since we can't perform the operation
+        error!(call_num, "real ucp_get_nbx not found, returning IO_ERROR since operation cannot be completed");
+        ucs_status_to_ptr(UCS_ERR_IO_ERROR) // Return error instead of fake success
     };
 
     // Clear reentrancy guard before returning
