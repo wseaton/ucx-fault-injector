@@ -147,9 +147,22 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
         debug!("looking up symbol with RTLD_NEXT: ucp_get_nbx");
         let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
 
+        // Check if we got our own function (infinite recursion trap)
+        let our_function_addr = ucp_get_nbx as *const () as *mut c_void;
+        if ptr == our_function_addr {
+            debug!("RTLD_NEXT returned our own function, skipping");
+            ptr = std::ptr::null_mut();
+        }
+
         if ptr.is_null() {
             debug!("RTLD_NEXT failed, trying RTLD_DEFAULT");
             ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+
+            // Check again for our own function
+            if ptr == our_function_addr {
+                debug!("RTLD_DEFAULT returned our own function, skipping");
+                ptr = std::ptr::null_mut();
+            }
         }
 
         if ptr.is_null() {
@@ -532,6 +545,7 @@ pub extern "C" fn ucp_get_nbx(
     if already_in_intercept {
         // We're being called recursively - this shouldn't happen if we resolve correctly
         // but as a safety fallback, return success to avoid infinite recursion
+        warn!("RECURSION DETECTED: ucp_get_nbx called while already intercepting");
         return std::ptr::null_mut(); // UCS_OK
     }
 
