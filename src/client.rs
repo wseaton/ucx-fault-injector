@@ -112,7 +112,7 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(command_file)?;
+        .open(&command_file)?;
 
     writeln!(file, "{}", command_json)?;
     file.sync_all()?;

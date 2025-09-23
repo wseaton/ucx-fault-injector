@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::Ordering;
 use nix::fcntl::{Flock, FlockArg};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
 use crate::subscriber::{get_current_state, start_file_watcher};
@@ -111,6 +111,16 @@ pub fn init_fault_injector() {
     if !function_intercept_already_initialized {
         info!("UCX fault injector loaded (Rust version)");
         info!(pid = current_pid, "initialization starting");
+
+        // Clear old command file to prevent replay of stale commands
+        let command_file = "/tmp/ucx-fault-commands";
+        if std::path::Path::new(command_file).exists() {
+            if let Err(e) = std::fs::remove_file(command_file) {
+                warn!(command_file, error = %e, "failed to clear old command file");
+            } else {
+                info!(command_file, "cleared old command file to prevent stale command replay");
+            }
+        }
 
         // Force initialization of real functions to check symbol loading
         debug!("initializing real UCX function pointer");

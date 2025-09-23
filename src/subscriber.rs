@@ -319,6 +319,7 @@ pub fn start_file_watcher() {
     use std::sync::mpsc;
 
     use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // Track last processed timestamp to avoid duplicates
     static LAST_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -337,6 +338,14 @@ pub fn start_file_watcher() {
             std::fs::write(command_file, "").ok();
         }
 
+        // Initialize LAST_PROCESSED to current time to avoid processing old commands
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        LAST_PROCESSED.store(current_time, std::sync::atomic::Ordering::Relaxed);
+        info!(pid = std::process::id(), start_time = current_time, "initialized file watcher to only process new commands");
+
         // Set up file watcher
         let (tx, rx) = mpsc::channel();
         let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -354,8 +363,7 @@ pub fn start_file_watcher() {
 
         info!(command_file, pid = std::process::id(), "file watcher started");
 
-        // Process initial file content
-        process_command_file(command_file, &LAST_PROCESSED);
+        // Skip processing initial file content to avoid replaying old commands
 
         // Watch for file changes
         for res in rx {
