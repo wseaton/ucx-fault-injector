@@ -29,21 +29,20 @@ struct Cli {
 enum Commands {
     /// Toggle fault injection on/off
     Toggle,
-    /// Set fault scenario (0=network, 1=timeout, 2=memory)
-    Scenario {
-        /// Scenario number (0, 1, or 2)
-        #[arg(value_parser = clap::value_parser!(u32).range(0..=2))]
-        scenario: u32,
-    },
     /// Set fault injection probability (0-100)
     Probability {
         /// Probability percentage (0-100)
         #[arg(value_parser = clap::value_parser!(u32).range(0..=100))]
         probability: u32,
     },
-    /// Set fault strategy pattern
-    Strategy {
-        /// Pattern: 'random' for probability-based, or pattern like 'XOOOOXOO' where X=fault, O=pass
+    /// Set error codes for fault injection
+    ErrorCodes {
+        /// Comma-separated list of error codes (use -- for negative values: "-- -3,-6,-20")
+        codes: String,
+    },
+    /// Set fault pattern for deterministic injection
+    Pattern {
+        /// Pattern like 'XOOOOXOO' where X=fault, O=pass
         pattern: String,
     },
     /// Reset to default settings
@@ -135,14 +134,6 @@ fn main() {
             recording_enabled: None,
             export_format: None,
         },
-        Commands::Scenario { scenario } => Command {
-            command: "set_scenario".to_string(),
-            scenario: Some(scenario),
-            value: None,
-            pattern: None,
-            recording_enabled: None,
-            export_format: None,
-        },
         Commands::Probability { probability } => Command {
             command: "set_probability".to_string(),
             scenario: None,
@@ -151,8 +142,16 @@ fn main() {
             recording_enabled: None,
             export_format: None,
         },
-        Commands::Strategy { pattern } => Command {
-            command: "set_strategy".to_string(),
+        Commands::ErrorCodes { codes } => Command {
+            command: "set_error_codes".to_string(),
+            scenario: None,
+            value: None,
+            pattern: Some(codes),
+            recording_enabled: None,
+            export_format: None,
+        },
+        Commands::Pattern { pattern } => Command {
+            command: "set_pattern".to_string(),
             scenario: None,
             value: None,
             pattern: Some(pattern),

@@ -1,6 +1,6 @@
 # UCX Fault Injector
 
-Dynamic fault injection for UCX applications via real-time ZMQ broadcast API.
+Dynamic fault injection for UCX applications via real-time file-based IPC.
 
 ## Build
 
@@ -20,9 +20,9 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 # Fault injection commands
 ./target/release/ucx-fault-client status                # Check status
 ./target/release/ucx-fault-client toggle                # Enable/disable
-./target/release/ucx-fault-client probability 50        # Set 50% fault rate
-./target/release/ucx-fault-client strategy random       # Use probability-based faults
-./target/release/ucx-fault-client strategy XOOOOXOO     # Use pattern-based faults
+./target/release/ucx-fault-client probability 50        # Set 50% fault rate (random selection)
+./target/release/ucx-fault-client error-codes -- -3,-6,-20 # Set custom error codes
+./target/release/ucx-fault-client pattern XOOOOXOO      # Set deterministic fault pattern
 ./target/release/ucx-fault-client reset                 # Reset defaults
 
 # Recording & replay commands
@@ -31,9 +31,6 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 ./target/release/ucx-fault-client record-dump pattern   # Export fault pattern
 ./target/release/ucx-fault-client replay                # Replay recorded pattern
 ./target/release/ucx-fault-client record-clear          # Clear recorded data
-
-# Error code pools (see Error Code Pools section)
-./target/release/ucx-fault-client error-codes -3,-6,-20 # Set custom error codes
 ```
 
 ## Example: Testing NIXL
@@ -49,7 +46,8 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so python nixl_example.py &
 
 # Inject faults
 ./target/release/ucx-fault-client toggle
-./target/release/ucx-fault-client strategy XOOOOXOO  # Fault every 1st and 6th call
+./target/release/ucx-fault-client pattern XOOOOXOO     # Fault every 1st and 6th call
+./target/release/ucx-fault-client error-codes -- -3,-6    # Use IO_ERROR and UNREACHABLE
 ```
 
 **Result:**
@@ -58,51 +56,64 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so python nixl_example.py &
 nixl._bindings.nixlBackendError: NIXL_ERR_BACKEND
 ```
 
-## Fault Strategies
+## Error Code System
 
-The fault injector supports two strategies for determining when to inject faults:
+The fault injector uses a simple error code system with two selection methods:
 
-### Probability-based (Random)
+### Random Selection (Probability-based)
 ```bash
-./target/release/ucx-fault-client strategy random
-./target/release/ucx-fault-client probability 25    # 25% chance per call
+./target/release/ucx-fault-client probability 25        # 25% chance per call
+./target/release/ucx-fault-client error-codes -- -3,-6,-20 # Custom error codes to select from
 ```
+- When a fault is triggered, randomly selects from the configured error codes
+- Default error codes: -3 (IO_ERROR), -6 (UNREACHABLE), -20 (TIMED_OUT)
 
-### Pattern-based (Deterministic)
+### Pattern-based Selection (Deterministic)
 ```bash
-./target/release/ucx-fault-client strategy XOOOOXOO  # X=fault, O=pass
+./target/release/ucx-fault-client pattern XOOOOXOO      # X=fault, O=pass
+./target/release/ucx-fault-client error-codes -- -3,-6     # Error codes to cycle through
 ```
 - Pattern repeats cyclically through UCX calls
 - `X` positions inject faults, `O` positions pass through normally
 - Example: `XOOOOXOO` faults calls 1, 6, 9, 14, 17, 22, etc.
+- Error codes are cycled through for each fault injection
 
-## Error Code Pools
-
-Both strategies now support **error code pools** - arrays of UCX error codes to randomly select from or cycle through:
+## Error Code Management
 
 ### Default Error Codes
-By default, strategies use these error codes:
+By default, the system uses these error codes:
 - `UCS_ERR_IO_ERROR` (-3): Network I/O failures
 - `UCS_ERR_UNREACHABLE` (-6): Unreachable endpoints
 - `UCS_ERR_TIMED_OUT` (-20): Operation timeouts
 
-### Custom Error Code Pools
+### Setting Custom Error Codes
 
-**ZMQ Commands:**
-```json
-// Random strategy with custom error codes
-{"command": "set_strategy", "pattern": "random", "error_codes": [-3,-6,-20]}
+**Via CLI:**
+```bash
+# Set specific error codes to use for fault injection
+./target/release/ucx-fault-client error-codes -- -3,-6,-20,-25
 
-// Pattern strategy with custom error codes
-{"command": "set_strategy", "pattern": "XOX", "error_codes": [-4,-15]}
+# Combined with probability (random selection)
+./target/release/ucx-fault-client probability 30
+./target/release/ucx-fault-client error-codes -- -4,-15
 
-// Update error codes for current strategy
-{"command": "set_error_codes", "error_codes": [-3,-6,-20,-25]}
+# Combined with pattern (deterministic cycling)
+./target/release/ucx-fault-client pattern XOXO
+./target/release/ucx-fault-client error-codes -- -3,-6
+```
+
+**Advanced file-based configuration:**
+```bash
+# Set error codes via direct file commands
+echo '{"timestamp": 1640995200, "command": "set_error_codes", "pattern": "-3,-6,-20,-25"}' >> /tmp/ucx-fault-commands
+
+# Set pattern with error codes
+echo '{"timestamp": 1640995200, "command": "set_pattern", "pattern": "XOX"}' >> /tmp/ucx-fault-commands
 ```
 
 **Behavior:**
-- **Random strategy**: Randomly selects error codes from the pool when faults are injected
-- **Pattern strategy**: Cycles through error codes based on pattern position (each 'X' gets the next error code)
+- **Random selection**: Randomly selects error codes from the pool when faults are triggered
+- **Pattern-based**: Cycles through error codes for each 'X' position in the pattern
 
 ## Call Recording & Replay
 

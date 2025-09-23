@@ -1,33 +1,27 @@
 use crate::ucx::UcsStatus;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FaultStrategy {
-    Random {
-        probability: u32,
-        error_codes: Vec<UcsStatus>,
-    },
-    Pattern {
-        pattern: String,
-        error_codes: Vec<UcsStatus>,
-        current_position: usize,
-    },
-    /// Pattern with exact error code mapping for precise replay
-    PatternWithMapping {
-        pattern: String,
-        error_code_mapping: Vec<UcsStatus>, // Maps each 'X' in pattern to specific error code
-        current_position: usize,
-    },
+pub enum SelectionMethod {
+    Random { probability: u32 },
+    Pattern { pattern: String, current_position: usize },
+    Replay { pattern: String, error_mapping: Vec<UcsStatus>, current_position: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaultStrategy {
+    pub error_codes: Vec<UcsStatus>,
+    pub selection_method: SelectionMethod,
 }
 
 impl FaultStrategy {
     pub fn new_random(probability: u32) -> Self {
-        Self::Random {
-            probability,
+        Self {
             error_codes: vec![
                 crate::ucx::UCS_ERR_IO_ERROR,
                 crate::ucx::UCS_ERR_UNREACHABLE,
                 crate::ucx::UCS_ERR_TIMED_OUT,
             ],
+            selection_method: SelectionMethod::Random { probability },
         }
     }
 
@@ -41,18 +35,20 @@ impl FaultStrategy {
         } else {
             error_codes
         };
-        Self::Random { probability, error_codes: codes }
+        Self {
+            error_codes: codes,
+            selection_method: SelectionMethod::Random { probability },
+        }
     }
 
     pub fn new_pattern(pattern: String) -> Self {
-        Self::Pattern {
-            pattern,
+        Self {
             error_codes: vec![
                 crate::ucx::UCS_ERR_IO_ERROR,
                 crate::ucx::UCS_ERR_UNREACHABLE,
                 crate::ucx::UCS_ERR_TIMED_OUT,
             ],
-            current_position: 0,
+            selection_method: SelectionMethod::Pattern { pattern, current_position: 0 },
         }
     }
 
@@ -66,19 +62,21 @@ impl FaultStrategy {
         } else {
             error_codes
         };
-        Self::Pattern {
-            pattern,
+        Self {
             error_codes: codes,
-            current_position: 0,
+            selection_method: SelectionMethod::Pattern { pattern, current_position: 0 },
         }
     }
 
-    /// Create a pattern strategy with exact error code mapping for replay
+    /// Create a replay strategy with exact error code mapping for precise replay
     pub fn new_pattern_with_mapping(pattern: String, error_code_mapping: Vec<UcsStatus>) -> Self {
-        Self::PatternWithMapping {
-            pattern,
-            error_code_mapping,
-            current_position: 0,
+        Self {
+            error_codes: vec![], // Not used in replay mode
+            selection_method: SelectionMethod::Replay {
+                pattern,
+                error_mapping: error_code_mapping,
+                current_position: 0,
+            },
         }
     }
 
@@ -93,18 +91,14 @@ impl FaultStrategy {
             // fallback to regular pattern if no error codes
             Self::new_pattern(pattern)
         } else {
-            Self::PatternWithMapping {
-                pattern,
-                error_code_mapping: error_mapping,
-                current_position: 0,
-            }
+            Self::new_pattern_with_mapping(pattern, error_mapping)
         }
     }
 
     pub fn should_inject(&mut self) -> Option<UcsStatus> {
-        match self {
-            Self::Random { probability, error_codes } => {
-                if *probability == 0 || error_codes.is_empty() {
+        match &mut self.selection_method {
+            SelectionMethod::Random { probability } => {
+                if *probability == 0 || self.error_codes.is_empty() {
                     return None;
                 }
 
@@ -119,14 +113,14 @@ impl FaultStrategy {
 
                 if random < *probability {
                     // randomly select an error code from the pool
-                    let code_index = (hasher.finish() % error_codes.len() as u64) as usize;
-                    Some(error_codes[code_index])
+                    let code_index = (hasher.finish() % self.error_codes.len() as u64) as usize;
+                    Some(self.error_codes[code_index])
                 } else {
                     None
                 }
             }
-            Self::Pattern { pattern, error_codes, current_position } => {
-                if pattern.is_empty() || error_codes.is_empty() {
+            SelectionMethod::Pattern { pattern, current_position } => {
+                if pattern.is_empty() || self.error_codes.is_empty() {
                     return None;
                 }
 
@@ -135,13 +129,13 @@ impl FaultStrategy {
 
                 if pattern_char == 'X' {
                     // cycle through error codes based on position
-                    let code_index = (*current_position - 1) % error_codes.len();
-                    Some(error_codes[code_index])
+                    let code_index = (*current_position - 1) % self.error_codes.len();
+                    Some(self.error_codes[code_index])
                 } else {
                     None
                 }
             }
-            Self::PatternWithMapping { pattern, error_code_mapping, current_position } => {
+            SelectionMethod::Replay { pattern, error_mapping, current_position } => {
                 if pattern.is_empty() {
                     return None;
                 }
@@ -156,9 +150,9 @@ impl FaultStrategy {
                         .filter(|&c| c == 'X')
                         .count();
 
-                    if x_count > 0 && !error_code_mapping.is_empty() {
-                        let mapping_index = (x_count - 1) % error_code_mapping.len();
-                        Some(error_code_mapping[mapping_index])
+                    if x_count > 0 && !error_mapping.is_empty() {
+                        let mapping_index = (x_count - 1) % error_mapping.len();
+                        Some(error_mapping[mapping_index])
                     } else {
                         // fallback to default error if mapping is incomplete
                         Some(crate::ucx::UCS_ERR_IO_ERROR)
@@ -171,7 +165,7 @@ impl FaultStrategy {
     }
 
     pub fn set_probability(&mut self, probability: u32) {
-        if let Self::Random { probability: ref mut p, .. } = self {
+        if let SelectionMethod::Random { probability: ref mut p } = &mut self.selection_method {
             *p = probability;
         }
     }
@@ -187,48 +181,56 @@ impl FaultStrategy {
             codes
         };
 
-        match self {
-            Self::Random { error_codes: ref mut ec, .. } => {
-                *ec = error_codes;
+        // Don't update error codes for Replay mode (it uses its own error_mapping)
+        if !matches!(self.selection_method, SelectionMethod::Replay { .. }) {
+            self.error_codes = error_codes;
+        }
+    }
+
+    pub fn set_pattern(&mut self, pattern: String) {
+        match &mut self.selection_method {
+            SelectionMethod::Pattern { pattern: ref mut p, current_position } => {
+                *p = pattern;
+                *current_position = 0;
             }
-            Self::Pattern { error_codes: ref mut ec, .. } => {
-                *ec = error_codes;
+            SelectionMethod::Replay { pattern: ref mut p, current_position, .. } => {
+                *p = pattern;
+                *current_position = 0;
             }
-            Self::PatternWithMapping { .. } => {
-                // PatternWithMapping uses its own error_code_mapping, ignore this call
+            _ => {
+                // Convert to pattern mode
+                self.selection_method = SelectionMethod::Pattern { pattern, current_position: 0 };
             }
         }
     }
 
     pub fn get_probability(&self) -> Option<u32> {
-        match self {
-            Self::Random { probability, .. } => Some(*probability),
-            Self::Pattern { .. } => None,
-            Self::PatternWithMapping { .. } => None,
+        match &self.selection_method {
+            SelectionMethod::Random { probability } => Some(*probability),
+            _ => None,
         }
     }
 
     pub fn get_error_codes(&self) -> &[UcsStatus] {
-        match self {
-            Self::Random { error_codes, .. } => error_codes,
-            Self::Pattern { error_codes, .. } => error_codes,
-            Self::PatternWithMapping { error_code_mapping, .. } => error_code_mapping,
+        match &self.selection_method {
+            SelectionMethod::Replay { error_mapping, .. } => error_mapping,
+            _ => &self.error_codes,
         }
     }
 
     pub fn get_pattern(&self) -> Option<&str> {
-        match self {
-            Self::Random { .. } => None,
-            Self::Pattern { pattern, .. } => Some(pattern),
-            Self::PatternWithMapping { pattern, .. } => Some(pattern),
+        match &self.selection_method {
+            SelectionMethod::Random { .. } => None,
+            SelectionMethod::Pattern { pattern, .. } => Some(pattern),
+            SelectionMethod::Replay { pattern, .. } => Some(pattern),
         }
     }
 
     pub fn get_strategy_name(&self) -> &'static str {
-        match self {
-            Self::Random { .. } => "random",
-            Self::Pattern { .. } => "pattern",
-            Self::PatternWithMapping { .. } => "pattern_with_mapping",
+        match &self.selection_method {
+            SelectionMethod::Random { .. } => "random",
+            SelectionMethod::Pattern { .. } => "pattern",
+            SelectionMethod::Replay { .. } => "replay",
         }
     }
 }

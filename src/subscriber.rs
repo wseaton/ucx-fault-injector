@@ -141,13 +141,47 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "set_error_codes" => {
-            if let Some(codes) = cmd.error_codes {
+            if let Some(codes_str) = cmd.pattern {
+                // Parse comma-separated error codes from pattern field
+                let parsed_codes: Result<Vec<i32>, _> = codes_str
+                    .split(',')
+                    .map(|s| s.trim().parse::<i32>())
+                    .collect();
+
+                match parsed_codes {
+                    Ok(codes) => {
+                        let error_codes = {
+                            let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                            strategy.set_error_codes(codes);
+                            let result = strategy.get_error_codes().to_vec();
+                            drop(strategy);
+                            result
+                        };
+                        info!(error_codes = ?error_codes, "error codes updated");
+                        Response {
+                            status: "ok".to_string(),
+                            message: format!("Error codes set to: {:?}", error_codes),
+                            state: Some(get_current_state()),
+                            recording_data: None,
+                        }
+                    }
+                    Err(_) => {
+                        Response {
+                            status: "error".to_string(),
+                            message: "Invalid error codes format. Use comma-separated integers (e.g., '-3,-6,-20')".to_string(),
+                            state: None,
+                            recording_data: None,
+                        }
+                    }
+                }
+            } else if let Some(codes) = cmd.error_codes {
+                // Legacy support for error_codes field
                 let error_codes = {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_error_codes(codes);
                     let result = strategy.get_error_codes().to_vec();
                     drop(strategy);
-                            result
+                    result
                 };
                 info!(error_codes = ?error_codes, "error codes updated");
                 Response {
@@ -159,7 +193,7 @@ pub fn handle_command(cmd: Command) -> Response {
             } else {
                 Response {
                     status: "error".to_string(),
-                    message: "Missing error_codes parameter".to_string(),
+                    message: "Missing error codes parameter".to_string(),
                     state: None,
                     recording_data: None,
                 }
@@ -299,6 +333,36 @@ pub fn handle_command(cmd: Command) -> Response {
                         "replayed_pattern": pattern,
                         "error_codes": error_codes
                     })),
+                }
+            }
+        }
+        "set_pattern" => {
+            if let Some(pattern) = cmd.pattern {
+                if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
+                    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                    strategy.set_pattern(pattern.clone());
+                    drop(strategy);
+                    info!(pattern = %pattern, "pattern updated");
+                    Response {
+                        status: "ok".to_string(),
+                        message: format!("Pattern set to: {}", pattern),
+                        state: Some(get_current_state()),
+                        recording_data: None,
+                    }
+                } else {
+                    Response {
+                        status: "error".to_string(),
+                        message: "Invalid pattern. Use only 'X' (fault) and 'O' (pass) characters".to_string(),
+                        state: None,
+                        recording_data: None,
+                    }
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing pattern parameter".to_string(),
+                    state: None,
+                    recording_data: None,
                 }
             }
         }
