@@ -4,7 +4,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::ucx::{UcsStatus, UcsStatusPtr, UcpEpH, UcpRkeyH, UcpRequestParamT, ucs_status_to_ptr};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE, is_in_intercept, set_in_intercept};
-use crate::shared_state::get_shared_state;
 use crate::subscriber::get_current_state;
 
 // function pointers to real UCX functions - use atomic pointer to avoid deadlock
@@ -47,32 +46,33 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
             info!("RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
 
             // First, try to find where UCX is already loaded by reading memory maps
-            let mut ucx_lib_paths = Vec::new();
-
             #[cfg(target_os = "linux")]
-            {
+            let ucx_lib_paths = {
+                let mut paths = Vec::new();
                 if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
                     for line in maps.lines() {
                         if line.contains("libucp") {
                             // Extract the library path from the maps line
                             if let Some(path_start) = line.rfind(' ') {
                                 let path = &line[path_start + 1..];
-                                if path.starts_with('/') && !ucx_lib_paths.contains(&path.to_string()) {
-                                    ucx_lib_paths.push(path.to_string());
+                                if path.starts_with('/') && !paths.contains(&path.to_string()) {
+                                    paths.push(path.to_string());
                                     info!("Found UCX library in memory map: {}", path);
                                 }
                             }
                         }
                     }
                 }
-            }
+                paths
+            };
 
             #[cfg(target_os = "macos")]
-            {
+            let ucx_lib_paths = {
                 // On macOS, we can't easily read memory maps like on Linux
                 // Instead, we'll rely on standard search paths
                 info!("macOS detected, using standard UCX search paths");
-            }
+                Vec::new()
+            };
 
             // Add the found paths to our search list
             let mut ucx_lib_names = ucx_lib_paths;
@@ -178,11 +178,9 @@ pub extern "C" fn ucp_get_nbx(
     // Set reentrancy guard
     set_in_intercept(true);
 
-    // Update shared statistics (zero-overhead atomic increments)
-    if let Some(shared) = get_shared_state() {
-        shared.total_calls.fetch_add(1, Ordering::Relaxed);
-        shared.ucp_get_nbx_calls.fetch_add(1, Ordering::Relaxed);
-    }
+    // Update local statistics (zero-overhead atomic increments)
+    LOCAL_STATE.total_calls.fetch_add(1, Ordering::Relaxed);
+    LOCAL_STATE.ucp_get_nbx_calls.fetch_add(1, Ordering::Relaxed);
 
     // Always log the first few calls to verify hook is working
     static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -202,17 +200,13 @@ pub extern "C" fn ucp_get_nbx(
     }
 
     if let Some(error_code) = should_inject_fault() {
-        // Record the fault injection decision
-        if let Some(shared) = get_shared_state() {
-            debug!("recording fault injection call #{}: error_code={}", call_num, error_code);
-            shared.call_recorder.record_call(true, error_code);
-            shared.faults_injected.fetch_add(1, Ordering::Relaxed);
-            shared.ucp_get_nbx_faults.fetch_add(1, Ordering::Relaxed);
-            shared.calls_since_fault.store(0, Ordering::Relaxed);
-            debug!("fault recorded successfully, total_records={}", shared.call_recorder.get_total_records());
-        } else {
-            warn!("cannot record fault injection call #{}: shared state not available", call_num);
-        }
+        // Record the fault injection decision in local state
+        debug!("recording fault injection call #{}: error_code={}", call_num, error_code);
+        LOCAL_STATE.call_recorder.record_call(true, error_code);
+        LOCAL_STATE.faults_injected.fetch_add(1, Ordering::Relaxed);
+        LOCAL_STATE.ucp_get_nbx_faults.fetch_add(1, Ordering::Relaxed);
+        LOCAL_STATE.calls_since_fault.store(0, Ordering::Relaxed);
+        debug!("fault recorded successfully, total_records={}", LOCAL_STATE.call_recorder.get_total_records());
 
         warn!(error_code = error_code, "[FAULT] INJECTED: ucp_get_nbx error ({})", error_code);
         let fault_result = ucs_status_to_ptr(error_code);
@@ -221,15 +215,11 @@ pub extern "C" fn ucp_get_nbx(
         set_in_intercept(false);
         return fault_result;
     } else {
-        // Record the successful call (no fault injected)
-        if let Some(shared) = get_shared_state() {
-            debug!("recording successful call #{}", call_num);
-            shared.call_recorder.record_call(false, 0); // 0 is placeholder, not used for success
-            shared.calls_since_fault.fetch_add(1, Ordering::Relaxed);
-            debug!("success recorded, total_records={}", shared.call_recorder.get_total_records());
-        } else {
-            warn!("cannot record successful call #{}: shared state not available", call_num);
-        }
+        // Record the successful call (no fault injected) in local state
+        debug!("recording successful call #{}", call_num);
+        LOCAL_STATE.call_recorder.record_call(false, 0); // 0 is placeholder, not used for success
+        LOCAL_STATE.calls_since_fault.fetch_add(1, Ordering::Relaxed);
+        debug!("success recorded, total_records={}", LOCAL_STATE.call_recorder.get_total_records());
     }
 
     // Get the real function pointer atomically - with lazy initialization

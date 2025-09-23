@@ -5,7 +5,6 @@ use nix::fcntl::{Flock, FlockArg};
 use tracing::{debug, error, info};
 
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
-use crate::shared_state::init_shared_state;
 use crate::subscriber::{get_current_state, start_zmq_subscriber};
 use crate::intercept::init_real_ucp_get_nbx;
 
@@ -84,14 +83,14 @@ pub fn print_library_debug_info() {
 
     // Check if we can find UCX symbols using different methods
     unsafe {
-        let ucp_put_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_put".as_ptr() as *const i8);
-        let ucp_put_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_put".as_ptr() as *const i8);
+        let ucp_put_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_put".as_ptr());
+        let ucp_put_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_put".as_ptr());
 
         debug!(address = ?ucp_put_default, "ucp_put via RTLD_DEFAULT");
         debug!(address = ?ucp_put_next, "ucp_put via RTLD_NEXT");
 
-        let ucp_get_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_get".as_ptr() as *const i8);
-        let ucp_get_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_get".as_ptr() as *const i8);
+        let ucp_get_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_get".as_ptr());
+        let ucp_get_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_get".as_ptr());
 
         debug!(address = ?ucp_get_default, "ucp_get via RTLD_DEFAULT");
         debug!(address = ?ucp_get_next, "ucp_get via RTLD_NEXT");
@@ -121,10 +120,7 @@ pub fn init_fault_injector() {
         info!("debug mode enabled via UCX_FAULT_DEBUG environment variable");
     }
 
-    // initialize shared state for cross-process statistics and persistence
-    if let Err(e) = init_shared_state() {
-        error!(error = %e, "failed to initialize shared state, continuing with local state only");
-    }
+    // shared state removed - using local state only for simplicity and reliability
 
     // initialize local state (still used for ZMQ-based configuration)
     let _ = &*LOCAL_STATE; // Force initialization

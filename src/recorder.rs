@@ -80,6 +80,12 @@ pub struct CallRecordBuffer {
 unsafe impl Send for CallRecordBuffer {}
 unsafe impl Sync for CallRecordBuffer {}
 
+impl Default for CallRecordBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CallRecordBuffer {
     pub const fn new() -> Self {
         // can't use CallRecord::default() in const context, so initialize manually
@@ -218,11 +224,10 @@ impl CallRecordBuffer {
             let record_index = (start_index + i) % MAX_CALL_RECORDS;
             let record = unsafe { (*self.records.get())[record_index] };
 
-            if record.sequence > 0 && record.fault_injected && record.error_code != 0 {
-                if !error_codes.contains(&record.error_code) {
+            if record.sequence > 0 && record.fault_injected && record.error_code != 0
+                && !error_codes.contains(&record.error_code) {
                     error_codes.push(record.error_code);
                 }
-            }
         }
 
         error_codes
@@ -243,7 +248,7 @@ impl CallRecordBuffer {
         let current_write_pos = self.write_index.load(Ordering::Relaxed) as usize;
 
         for i in 0..requested_count {
-            let record_index = if current_write_pos >= i + 1 {
+            let record_index = if current_write_pos > i {
                 (current_write_pos - i - 1) % MAX_CALL_RECORDS
             } else {
                 (MAX_CALL_RECORDS + current_write_pos - i - 1) % MAX_CALL_RECORDS

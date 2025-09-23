@@ -1,7 +1,6 @@
 pub mod ucx;
 pub mod strategy;
 pub mod state;
-pub mod shared_state;
 pub mod commands;
 pub mod subscriber;
 pub mod init;
@@ -18,7 +17,6 @@ pub use commands::{Command, Response, State};
 pub use subscriber::{get_current_state, handle_command};
 pub use intercept::ucp_get_nbx;
 pub use init::init_fault_injector;
-pub use shared_state::{get_shared_state, init_shared_state};
 pub use recorder::{CallRecord, CallRecordBuffer, SerializableCallRecord, RecordingSummary};
 
 // The fault injector will be initialized automatically via #[ctor] in production

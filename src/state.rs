@@ -1,14 +1,23 @@
 use once_cell::sync::Lazy;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 use tracing::info;
 
 use crate::strategy::FaultStrategy;
+use crate::recorder::CallRecordBuffer;
 
 // Local process state structure (no shared memory)
 pub struct LocalFaultState {
     pub enabled: AtomicBool,
     pub strategy: Mutex<FaultStrategy>,
+
+    // Call recording and statistics (local only)
+    pub call_recorder: CallRecordBuffer,
+    pub total_calls: AtomicU64,
+    pub faults_injected: AtomicU64,
+    pub calls_since_fault: AtomicU64,
+    pub ucp_get_nbx_calls: AtomicU64,
+    pub ucp_get_nbx_faults: AtomicU64,
 }
 
 impl LocalFaultState {
@@ -16,6 +25,12 @@ impl LocalFaultState {
         Self {
             enabled: AtomicBool::new(false),
             strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
+            call_recorder: CallRecordBuffer::new(),
+            total_calls: AtomicU64::new(0),
+            faults_injected: AtomicU64::new(0),
+            calls_since_fault: AtomicU64::new(0),
+            ucp_get_nbx_calls: AtomicU64::new(0),
+            ucp_get_nbx_faults: AtomicU64::new(0),
         }
     }
 }
