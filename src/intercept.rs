@@ -202,8 +202,9 @@ pub extern "C" fn ucp_get_nbx(
     }
 
     if let Some(error_code) = should_inject_fault() {
-        // Update fault statistics in shared memory
+        // Record the fault injection decision
         if let Some(shared) = get_shared_state() {
+            shared.call_recorder.record_call(true, error_code);
             shared.faults_injected.fetch_add(1, Ordering::Relaxed);
             shared.ucp_get_nbx_faults.fetch_add(1, Ordering::Relaxed);
             shared.calls_since_fault.store(0, Ordering::Relaxed);
@@ -216,8 +217,9 @@ pub extern "C" fn ucp_get_nbx(
         set_in_intercept(false);
         return fault_result;
     } else {
-        // No fault injected, increment calls since last fault
+        // Record the successful call (no fault injected)
         if let Some(shared) = get_shared_state() {
+            shared.call_recorder.record_call(false, 0); // 0 is placeholder, not used for success
             shared.calls_since_fault.fetch_add(1, Ordering::Relaxed);
         }
     }

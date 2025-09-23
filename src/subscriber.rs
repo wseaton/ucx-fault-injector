@@ -6,6 +6,7 @@ use crate::commands::{Command, Response, State};
 use crate::state::LOCAL_STATE;
 use crate::shared_state::get_shared_state;
 use crate::strategy::FaultStrategy;
+use crate::recorder::SerializableCallRecord;
 
 // Helper to sync local state changes to shared memory
 fn sync_to_shared_state() {
@@ -28,6 +29,12 @@ fn sync_to_shared_state() {
                 shared.set_pattern(pattern);
                 shared.set_error_codes(error_codes);
             }
+            FaultStrategy::PatternWithMapping { pattern, current_position, error_code_mapping } => {
+                shared.strategy_type.store(2, Ordering::Relaxed); // 2 = PatternWithMapping
+                shared.pattern_position.store(*current_position as u64, Ordering::Relaxed);
+                shared.set_pattern(pattern);
+                shared.set_error_codes(error_code_mapping);
+            }
         }
 
         debug!("synchronized local state to shared memory");
@@ -38,12 +45,25 @@ fn sync_to_shared_state() {
 pub fn get_current_state() -> State {
     let strategy = LOCAL_STATE.strategy.lock().unwrap();
 
+    let (recording_enabled, total_calls, pattern_length) = if let Some(shared) = get_shared_state() {
+        (
+            shared.call_recorder.is_recording_enabled(),
+            shared.call_recorder.get_total_records(),
+            shared.call_recorder.generate_pattern().len()
+        )
+    } else {
+        (false, 0, 0)
+    };
+
     State {
         enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
         probability: strategy.get_probability().unwrap_or(0),
         strategy: strategy.get_strategy_name().to_string(),
         pattern: strategy.get_pattern().map(|s| s.to_string()),
         error_codes: strategy.get_error_codes().to_vec(),
+        recording_enabled,
+        total_recorded_calls: total_calls,
+        recorded_pattern_length: pattern_length,
     }
 }
 
@@ -59,6 +79,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 status: "ok".to_string(),
                 message: format!("Fault injection {}", if new_state { "enabled" } else { "disabled" }),
                 state: Some(get_current_state()),
+                recording_data: None,
             }
         }
         "set_probability" => {
@@ -73,12 +94,14 @@ pub fn handle_command(cmd: Command) -> Response {
                         status: "ok".to_string(),
                         message: format!("Probability set to {}%", value),
                         state: Some(get_current_state()),
+                        recording_data: None,
                     }
                 } else {
                     Response {
                         status: "error".to_string(),
                         message: "Invalid probability. Must be 0-100".to_string(),
                         state: None,
+                        recording_data: None,
                     }
                 }
             } else {
@@ -86,6 +109,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     status: "error".to_string(),
                     message: "Missing value parameter".to_string(),
                     state: None,
+                    recording_data: None,
                 }
             }
         }
@@ -103,6 +127,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 status: "ok".to_string(),
                 message: "Reset to defaults".to_string(),
                 state: Some(get_current_state()),
+                recording_data: None,
             }
         }
         "set_strategy" => {
@@ -124,6 +149,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         status: "ok".to_string(),
                         message: "Strategy set to random".to_string(),
                         state: Some(get_current_state()),
+                        recording_data: None,
                     }
                 } else if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
                     if error_codes.is_empty() {
@@ -138,12 +164,14 @@ pub fn handle_command(cmd: Command) -> Response {
                         status: "ok".to_string(),
                         message: format!("Strategy set to pattern: {}", pattern),
                         state: Some(get_current_state()),
+                        recording_data: None,
                     }
                 } else {
                     Response {
                         status: "error".to_string(),
                         message: "Invalid pattern. Use 'random' or a pattern with only 'X' (fault) and 'O' (pass) characters".to_string(),
                         state: None,
+                        recording_data: None,
                     }
                 }
             } else {
@@ -151,6 +179,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     status: "error".to_string(),
                     message: "Missing pattern parameter".to_string(),
                     state: None,
+                    recording_data: None,
                 }
             }
         }
@@ -169,12 +198,14 @@ pub fn handle_command(cmd: Command) -> Response {
                     status: "ok".to_string(),
                     message: format!("Error codes set to: {:?}", error_codes),
                     state: Some(get_current_state()),
+                    recording_data: None,
                 }
             } else {
                 Response {
                     status: "error".to_string(),
                     message: "Missing error_codes parameter".to_string(),
                     state: None,
+                    recording_data: None,
                 }
             }
         }
@@ -183,6 +214,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 status: "ok".to_string(),
                 message: "Current state".to_string(),
                 state: Some(get_current_state()),
+                recording_data: None,
             }
         }
         "stats" => {
@@ -210,12 +242,141 @@ pub fn handle_command(cmd: Command) -> Response {
                     status: "ok".to_string(),
                     message: stats_message,
                     state: Some(get_current_state()),
+                    recording_data: None,
                 }
             } else {
                 Response {
                     status: "error".to_string(),
                     message: "Shared memory not available".to_string(),
                     state: Some(get_current_state()),
+                    recording_data: None,
+                }
+            }
+        }
+        "toggle_recording" => {
+            if let Some(shared) = get_shared_state() {
+                let current = shared.call_recorder.is_recording_enabled();
+                let new_state = cmd.recording_enabled.unwrap_or(!current);
+                shared.call_recorder.set_recording_enabled(new_state);
+                info!(recording_enabled = new_state, "call recording toggled");
+                Response {
+                    status: "ok".to_string(),
+                    message: format!("Call recording {}", if new_state { "enabled" } else { "disabled" }),
+                    state: Some(get_current_state()),
+                    recording_data: None,
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Shared memory not available".to_string(),
+                    state: None,
+                    recording_data: None,
+                }
+            }
+        }
+        "clear_recording" => {
+            if let Some(shared) = get_shared_state() {
+                shared.call_recorder.clear();
+                info!("call recording buffer cleared");
+                Response {
+                    status: "ok".to_string(),
+                    message: "Call recording buffer cleared".to_string(),
+                    state: Some(get_current_state()),
+                    recording_data: None,
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Shared memory not available".to_string(),
+                    state: None,
+                    recording_data: None,
+                }
+            }
+        }
+        "dump_recording" => {
+            if let Some(shared) = get_shared_state() {
+                let format = cmd.export_format.as_deref().unwrap_or("summary");
+
+                let recording_data = match format {
+                    "pattern" => {
+                        let pattern = shared.call_recorder.generate_pattern();
+                        let error_codes = shared.call_recorder.extract_error_codes();
+                        serde_json::json!({
+                            "pattern": pattern,
+                            "error_codes": error_codes,
+                            "total_calls": shared.call_recorder.get_total_records()
+                        })
+                    }
+                    "records" => {
+                        let count = cmd.value.unwrap_or(100) as usize;
+                        let records: Vec<SerializableCallRecord> = shared.call_recorder
+                            .get_recent_records(count)
+                            .into_iter()
+                            .map(SerializableCallRecord::from)
+                            .collect();
+                        serde_json::json!({
+                            "records": records,
+                            "total_count": records.len()
+                        })
+                    }
+                    "summary" | _ => {
+                        let summary = shared.call_recorder.generate_summary();
+                        serde_json::to_value(summary).unwrap_or(serde_json::json!({}))
+                    }
+                };
+
+                Response {
+                    status: "ok".to_string(),
+                    message: format!("Recording data exported in {} format", format),
+                    state: Some(get_current_state()),
+                    recording_data: Some(recording_data),
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Shared memory not available".to_string(),
+                    state: None,
+                    recording_data: None,
+                }
+            }
+        }
+        "replay_recording" => {
+            if let Some(shared) = get_shared_state() {
+                let pattern = shared.call_recorder.generate_pattern();
+                let error_codes = shared.call_recorder.extract_error_codes();
+
+                if pattern.is_empty() {
+                    Response {
+                        status: "error".to_string(),
+                        message: "No recorded pattern available for replay".to_string(),
+                        state: Some(get_current_state()),
+                        recording_data: None,
+                    }
+                } else {
+                    // Create new strategy from recorded pattern
+                    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                    *strategy = FaultStrategy::from_recorded_pattern(pattern.clone(), error_codes.clone());
+                    drop(strategy);
+                    sync_to_shared_state();
+
+                    info!(pattern = %pattern, error_codes = ?error_codes, "replaying recorded pattern");
+                    Response {
+                        status: "ok".to_string(),
+                        message: format!("Replaying recorded pattern: {} ({} calls, {} error codes)",
+                                       pattern, pattern.len(), error_codes.len()),
+                        state: Some(get_current_state()),
+                        recording_data: Some(serde_json::json!({
+                            "replayed_pattern": pattern,
+                            "error_codes": error_codes
+                        })),
+                    }
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Shared memory not available".to_string(),
+                    state: None,
+                    recording_data: None,
                 }
             }
         }
@@ -224,6 +385,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 status: "error".to_string(),
                 message: format!("Unknown command: {}", cmd.command),
                 state: None,
+                recording_data: None,
             }
         }
     }

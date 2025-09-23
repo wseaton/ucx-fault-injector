@@ -11,6 +11,12 @@ pub enum FaultStrategy {
         error_codes: Vec<UcsStatus>,
         current_position: usize,
     },
+    /// Pattern with exact error code mapping for precise replay
+    PatternWithMapping {
+        pattern: String,
+        error_code_mapping: Vec<UcsStatus>, // Maps each 'X' in pattern to specific error code
+        current_position: usize,
+    },
 }
 
 impl FaultStrategy {
@@ -67,6 +73,34 @@ impl FaultStrategy {
         }
     }
 
+    /// Create a pattern strategy with exact error code mapping for replay
+    pub fn new_pattern_with_mapping(pattern: String, error_code_mapping: Vec<UcsStatus>) -> Self {
+        Self::PatternWithMapping {
+            pattern,
+            error_code_mapping,
+            current_position: 0,
+        }
+    }
+
+    /// Create pattern from recorded calls with perfect error code preservation
+    pub fn from_recorded_pattern(pattern: String, recorded_error_codes: Vec<i32>) -> Self {
+        // convert i32 error codes back to UcsStatus
+        let error_mapping: Vec<UcsStatus> = recorded_error_codes.into_iter()
+            .map(|code| code as UcsStatus)
+            .collect();
+
+        if error_mapping.is_empty() {
+            // fallback to regular pattern if no error codes
+            Self::new_pattern(pattern)
+        } else {
+            Self::PatternWithMapping {
+                pattern,
+                error_code_mapping: error_mapping,
+                current_position: 0,
+            }
+        }
+    }
+
     pub fn should_inject(&mut self) -> Option<UcsStatus> {
         match self {
             Self::Random { probability, error_codes } => {
@@ -107,6 +141,32 @@ impl FaultStrategy {
                     None
                 }
             }
+            Self::PatternWithMapping { pattern, error_code_mapping, current_position } => {
+                if pattern.is_empty() {
+                    return None;
+                }
+
+                let pattern_char = pattern.chars().nth(*current_position % pattern.len()).unwrap_or('O');
+                *current_position += 1;
+
+                if pattern_char == 'X' {
+                    // find which 'X' this is in the pattern to map to correct error code
+                    let x_count = pattern.chars()
+                        .take(*current_position)
+                        .filter(|&c| c == 'X')
+                        .count();
+
+                    if x_count > 0 && !error_code_mapping.is_empty() {
+                        let mapping_index = (x_count - 1) % error_code_mapping.len();
+                        Some(error_code_mapping[mapping_index])
+                    } else {
+                        // fallback to default error if mapping is incomplete
+                        Some(crate::ucx::UCS_ERR_IO_ERROR)
+                    }
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -134,6 +194,9 @@ impl FaultStrategy {
             Self::Pattern { error_codes: ref mut ec, .. } => {
                 *ec = error_codes;
             }
+            Self::PatternWithMapping { .. } => {
+                // PatternWithMapping uses its own error_code_mapping, ignore this call
+            }
         }
     }
 
@@ -141,6 +204,7 @@ impl FaultStrategy {
         match self {
             Self::Random { probability, .. } => Some(*probability),
             Self::Pattern { .. } => None,
+            Self::PatternWithMapping { .. } => None,
         }
     }
 
@@ -148,6 +212,7 @@ impl FaultStrategy {
         match self {
             Self::Random { error_codes, .. } => error_codes,
             Self::Pattern { error_codes, .. } => error_codes,
+            Self::PatternWithMapping { error_code_mapping, .. } => error_code_mapping,
         }
     }
 
@@ -155,6 +220,7 @@ impl FaultStrategy {
         match self {
             Self::Random { .. } => None,
             Self::Pattern { pattern, .. } => Some(pattern),
+            Self::PatternWithMapping { pattern, .. } => Some(pattern),
         }
     }
 
@@ -162,6 +228,7 @@ impl FaultStrategy {
         match self {
             Self::Random { .. } => "random",
             Self::Pattern { .. } => "pattern",
+            Self::PatternWithMapping { .. } => "pattern_with_mapping",
         }
     }
 }

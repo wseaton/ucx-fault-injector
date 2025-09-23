@@ -5,6 +5,7 @@ use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
 use nix::sys::stat::Mode;
 use nix::fcntl::OFlag;
 use tracing::{debug, info, warn};
+use crate::recorder::CallRecordBuffer;
 
 const MAGIC_NUMBER: u64 = 0xDEADBEEF12345678;
 const VERSION: u32 = 1;
@@ -47,8 +48,11 @@ pub struct SharedFaultState {
     pub ucp_get_nbx_calls: AtomicU64,
     pub ucp_get_nbx_faults: AtomicU64,
 
-    // Reserved space for future expansion (maintain page alignment)
-    _reserved: [u8; 3647],          // Pad to 4096 bytes total (account for pattern_lock)
+    // Call recording buffer (embedded in shared memory)
+    pub call_recorder: CallRecordBuffer,
+
+    // Reserved space for future expansion (much smaller now due to recorder)
+    _reserved: [u8; 256],
 }
 
 impl SharedFaultState {
@@ -76,7 +80,8 @@ impl SharedFaultState {
             calls_since_fault: AtomicU64::new(0),
             ucp_get_nbx_calls: AtomicU64::new(0),
             ucp_get_nbx_faults: AtomicU64::new(0),
-            _reserved: [0u8; 3647],
+            call_recorder: CallRecordBuffer::new(),
+            _reserved: [0u8; 256],
         }
     }
 
