@@ -4,6 +4,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::ucx::{UcsStatus, UcsStatusPtr, UcpEpH, UcpRkeyH, UcpRequestParamT, ucs_status_to_ptr};
 use crate::state::{DEBUG_ENABLED, IN_INTERCEPT, LOCAL_STATE};
+use crate::shared_state::get_shared_state;
 use crate::subscriber::get_current_state;
 
 // function pointers to real UCX functions - use atomic pointer to avoid deadlock
@@ -183,6 +184,12 @@ pub extern "C" fn ucp_get_nbx(
         *flag.borrow_mut() = true;
     });
 
+    // Update shared statistics (zero-overhead atomic increments)
+    if let Some(shared) = get_shared_state() {
+        shared.total_calls.fetch_add(1, Ordering::Relaxed);
+        shared.ucp_get_nbx_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Always log the first few calls to verify hook is working
     static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
     let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -201,6 +208,13 @@ pub extern "C" fn ucp_get_nbx(
     }
 
     if let Some(error_code) = should_inject_fault() {
+        // Update fault statistics in shared memory
+        if let Some(shared) = get_shared_state() {
+            shared.faults_injected.fetch_add(1, Ordering::Relaxed);
+            shared.ucp_get_nbx_faults.fetch_add(1, Ordering::Relaxed);
+            shared.calls_since_fault.store(0, Ordering::Relaxed);
+        }
+
         warn!(error_code = error_code, "[FAULT] INJECTED: ucp_get_nbx error ({})", error_code);
         let fault_result = ucs_status_to_ptr(error_code);
 
@@ -209,6 +223,11 @@ pub extern "C" fn ucp_get_nbx(
             *flag.borrow_mut() = false;
         });
         return fault_result;
+    } else {
+        // No fault injected, increment calls since last fault
+        if let Some(shared) = get_shared_state() {
+            shared.calls_since_fault.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     // Get the real function pointer atomically - with lazy initialization

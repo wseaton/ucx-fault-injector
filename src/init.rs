@@ -5,6 +5,7 @@ use nix::fcntl::{Flock, FlockArg};
 use tracing::{debug, error, info};
 
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
+use crate::shared_state::init_shared_state;
 use crate::subscriber::{get_current_state, start_zmq_subscriber};
 use crate::intercept::init_real_ucp_get_nbx;
 
@@ -120,7 +121,12 @@ pub fn init_fault_injector() {
         info!("debug mode enabled via UCX_FAULT_DEBUG environment variable");
     }
 
-    // initialize local state (much safer than shared memory)
+    // initialize shared state for cross-process statistics and persistence
+    if let Err(e) = init_shared_state() {
+        error!(error = %e, "failed to initialize shared state, continuing with local state only");
+    }
+
+    // initialize local state (still used for ZMQ-based configuration)
     let _ = &*LOCAL_STATE; // Force initialization
     let state = get_current_state();
     info!(
@@ -147,6 +153,7 @@ pub fn init_fault_injector() {
     info!("  {{\"command\": \"set_error_codes\", \"error_codes\": [-3,-6,-20]}} - update error codes for current strategy");
     info!("  {{\"command\": \"reset\"}} - reset to defaults");
     info!("  {{\"command\": \"status\"}} - get current state");
+    info!("  {{\"command\": \"stats\"}} - view shared memory statistics");
 
     // Force initialization of real functions to check symbol loading
     debug!("initializing real UCX function pointer");
@@ -155,6 +162,11 @@ pub fn init_fault_injector() {
     // Print detailed debug info if debug mode is enabled
     if DEBUG_ENABLED.load(Ordering::Relaxed) {
         print_library_debug_info();
+    }
+
+    // register atexit handler as backup cleanup mechanism
+    unsafe {
+        libc::atexit(atexit_cleanup);
     }
 
     info!("UCX fault injector initialization complete");
@@ -166,4 +178,43 @@ pub fn init_fault_injector() {
 #[ctor::ctor]
 fn auto_init_fault_injector() {
     init_fault_injector();
+}
+
+// shared cleanup function for both dtor and atexit
+fn perform_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+    // Use atomic CAS to ensure only one cleanup happens, avoiding deadlock from signal + dtor
+    if CLEANUP_IN_PROGRESS.compare_exchange(
+        false, true, Ordering::AcqRel, Ordering::Relaxed
+    ).is_ok() {
+        info!(pid = std::process::id(), "UCX fault injector cleanup starting");
+
+        // The SharedStateManager Drop implementation will handle:
+        // - Decrementing reference counter in shared memory
+        // - Unmapping shared memory from this process
+        // - Removing shared memory segment if this is the last process
+
+        // Note: Local state cleanup happens automatically via Drop impls
+        info!(pid = std::process::id(), "UCX fault injector cleanup complete");
+
+        CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
+    } else {
+        // Another thread/signal handler is already doing cleanup
+        debug!(pid = std::process::id(), "cleanup already in progress, skipping");
+    }
+}
+
+// register atexit handler as backup cleanup (called in all processes)
+extern "C" fn atexit_cleanup() {
+    perform_cleanup();
+}
+
+// automatic cleanup via destructor (disabled during tests)
+#[cfg(not(test))]
+#[ctor::dtor]
+fn auto_cleanup_fault_injector() {
+    perform_cleanup();
 }

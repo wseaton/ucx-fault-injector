@@ -4,7 +4,35 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{Command, Response, State};
 use crate::state::LOCAL_STATE;
+use crate::shared_state::get_shared_state;
 use crate::strategy::FaultStrategy;
+
+// Helper to sync local state changes to shared memory
+fn sync_to_shared_state() {
+    if let Some(shared) = get_shared_state() {
+        let enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed);
+        let strategy = LOCAL_STATE.strategy.lock().unwrap();
+
+        shared.enabled.store(enabled, Ordering::Relaxed);
+
+        match &*strategy {
+            FaultStrategy::Random { probability, error_codes } => {
+                shared.probability.store(*probability as u32, Ordering::Relaxed);
+                shared.strategy_type.store(0, Ordering::Relaxed); // 0 = Random
+                shared.pattern_len.store(0, Ordering::Relaxed); // Clear pattern
+                shared.set_error_codes(error_codes);
+            }
+            FaultStrategy::Pattern { pattern, current_position, error_codes } => {
+                shared.strategy_type.store(1, Ordering::Relaxed); // 1 = Pattern
+                shared.pattern_position.store(*current_position as u64, Ordering::Relaxed);
+                shared.set_pattern(pattern);
+                shared.set_error_codes(error_codes);
+            }
+        }
+
+        debug!("synchronized local state to shared memory");
+    }
+}
 
 // Socket server functions for fault control
 pub fn get_current_state() -> State {
@@ -25,6 +53,7 @@ pub fn handle_command(cmd: Command) -> Response {
             let current = LOCAL_STATE.enabled.load(Ordering::Relaxed);
             let new_state = !current;
             LOCAL_STATE.enabled.store(new_state, Ordering::Relaxed);
+            sync_to_shared_state();
             info!(enabled = new_state, "fault injection toggled");
             Response {
                 status: "ok".to_string(),
@@ -37,6 +66,8 @@ pub fn handle_command(cmd: Command) -> Response {
                 if value <= 100 {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_probability(value);
+                    drop(strategy);
+                    sync_to_shared_state();
                     info!(probability = value, "probability set");
                     Response {
                         status: "ok".to_string(),
@@ -64,6 +95,8 @@ pub fn handle_command(cmd: Command) -> Response {
             // Reset strategy to random with default probability
             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
             *strategy = FaultStrategy::new_random(25);
+            drop(strategy);
+            sync_to_shared_state();
 
             info!("reset to defaults");
             Response {
@@ -84,6 +117,8 @@ pub fn handle_command(cmd: Command) -> Response {
                     } else {
                         *strategy = FaultStrategy::new_random_with_codes(current_prob, error_codes);
                     }
+                    drop(strategy);
+                    sync_to_shared_state();
                     info!("switched to random fault strategy");
                     Response {
                         status: "ok".to_string(),
@@ -96,6 +131,8 @@ pub fn handle_command(cmd: Command) -> Response {
                     } else {
                         *strategy = FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
                     }
+                    drop(strategy);
+                    sync_to_shared_state();
                     info!(pattern = %pattern, "switched to pattern fault strategy");
                     Response {
                         status: "ok".to_string(),
@@ -122,7 +159,10 @@ pub fn handle_command(cmd: Command) -> Response {
                 let error_codes = {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_error_codes(codes);
-                    strategy.get_error_codes().to_vec()
+                    let result = strategy.get_error_codes().to_vec();
+                    drop(strategy);
+                    sync_to_shared_state();
+                    result
                 };
                 info!(error_codes = ?error_codes, "error codes updated");
                 Response {
@@ -143,6 +183,40 @@ pub fn handle_command(cmd: Command) -> Response {
                 status: "ok".to_string(),
                 message: "Current state".to_string(),
                 state: Some(get_current_state()),
+            }
+        }
+        "stats" => {
+            if let Some(shared) = get_shared_state() {
+                let stats_message = format!(
+                    "Shared Memory Statistics:\n\
+                     - Total calls: {}\n\
+                     - Faults injected: {}\n\
+                     - Calls since last fault: {}\n\
+                     - ucp_get_nbx calls: {}\n\
+                     - ucp_get_nbx faults: {}\n\
+                     - Active processes: {}\n\
+                     - Last writer PID: {}\n\
+                     - Generation: {}",
+                    shared.total_calls.load(Ordering::Relaxed),
+                    shared.faults_injected.load(Ordering::Relaxed),
+                    shared.calls_since_fault.load(Ordering::Relaxed),
+                    shared.ucp_get_nbx_calls.load(Ordering::Relaxed),
+                    shared.ucp_get_nbx_faults.load(Ordering::Relaxed),
+                    shared.ref_count.load(Ordering::Relaxed),
+                    shared.last_writer_pid.load(Ordering::Relaxed),
+                    shared.generation.load(Ordering::Relaxed),
+                );
+                Response {
+                    status: "ok".to_string(),
+                    message: stats_message,
+                    state: Some(get_current_state()),
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Shared memory not available".to_string(),
+                    state: Some(get_current_state()),
+                }
             }
         }
         _ => {
