@@ -325,9 +325,21 @@ pub fn handle_command(cmd: Command) -> Response {
                     }
                 };
 
+                // Write to file
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let filename = format!("ucx-fault-dump-{}-{}.json", format, timestamp);
+
+                let file_result = match std::fs::write(&filename, serde_json::to_string_pretty(&recording_data).unwrap_or_default()) {
+                    Ok(()) => format!("Recording data exported to {}", filename),
+                    Err(e) => format!("Recording data exported in {} format (file write failed: {})", format, e)
+                };
+
                 Response {
                     status: "ok".to_string(),
-                    message: format!("Recording data exported in {} format", format),
+                    message: file_result,
                     state: Some(get_current_state()),
                     recording_data: Some(recording_data),
                 }
@@ -419,6 +431,8 @@ pub fn start_zmq_subscriber() {
                             let response = handle_command(cmd);
                             if is_status_cmd {
                                 info!(pid = std::process::id(), response = %response.message, state = ?response.state, "processed command");
+                            } else if let Some(recording_data) = &response.recording_data {
+                                info!(pid = std::process::id(), response = %response.message, recording_data = %recording_data, "processed command");
                             } else {
                                 info!(pid = std::process::id(), response = %response.message, "processed command");
                             }
