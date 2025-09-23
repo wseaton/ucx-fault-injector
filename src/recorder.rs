@@ -283,6 +283,28 @@ impl From<CallRecord> for SerializableCallRecord {
     }
 }
 
+/// Backup structure for preserving recording data during shared memory reinitialization
+#[derive(Debug, Clone)]
+pub struct CallRecordBackup {
+    pub records: Vec<CallRecord>,
+    pub total_records: u64,
+    pub write_index: u64,
+    pub recording_enabled: u32,
+    pub generation: u64,
+}
+
+impl CallRecordBackup {
+    pub fn empty() -> Self {
+        Self {
+            records: Vec::new(),
+            total_records: 0,
+            write_index: 0,
+            recording_enabled: 1, // keep recording enabled by default
+            generation: 1,
+        }
+    }
+}
+
 /// Recording statistics and summary
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RecordingSummary {
@@ -297,6 +319,77 @@ pub struct RecordingSummary {
 }
 
 impl CallRecordBuffer {
+    /// Create a backup of the current recording state
+    pub fn backup_state(&self) -> CallRecordBackup {
+        let total_records = self.total_records.load(Ordering::Relaxed);
+        if total_records == 0 {
+            return CallRecordBackup::empty();
+        }
+
+        let record_count = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
+        let mut backed_up_records = Vec::with_capacity(record_count);
+
+        // determine starting position for chronological order
+        let start_index = if total_records as usize <= MAX_CALL_RECORDS {
+            0
+        } else {
+            (self.write_index.load(Ordering::Relaxed) % MAX_CALL_RECORDS as u64) as usize
+        };
+
+        // copy records in chronological order
+        for i in 0..record_count {
+            let record_index = (start_index + i) % MAX_CALL_RECORDS;
+            let record = unsafe { (*self.records.get())[record_index] };
+
+            if record.sequence > 0 {
+                backed_up_records.push(record);
+            }
+        }
+
+        CallRecordBackup {
+            records: backed_up_records,
+            total_records,
+            write_index: self.write_index.load(Ordering::Relaxed),
+            recording_enabled: self.recording_enabled.load(Ordering::Relaxed),
+            generation: self.generation.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Restore from a backup (preserving existing data if backup is valid)
+    pub fn restore_from_backup(&self, backup: CallRecordBackup) {
+        if backup.records.is_empty() {
+            return; // nothing to restore
+        }
+
+        // restore metadata
+        self.total_records.store(backup.total_records, Ordering::Relaxed);
+        self.write_index.store(backup.write_index, Ordering::Relaxed);
+        self.recording_enabled.store(backup.recording_enabled, Ordering::Relaxed);
+        self.generation.store(backup.generation + 1, Ordering::Relaxed); // increment generation
+
+        // restore records to buffer
+        unsafe {
+            let records_array = &mut *self.records.get();
+
+            // clear existing records first
+            const EMPTY_RECORD: CallRecord = CallRecord {
+                sequence: 0,
+                timestamp_us: 0,
+                fault_injected: false,
+                error_code: 0,
+                function_hash: 0,
+            };
+            *records_array = [EMPTY_RECORD; MAX_CALL_RECORDS];
+
+            // restore backed up records
+            for (i, &record) in backup.records.iter().enumerate() {
+                if i < MAX_CALL_RECORDS {
+                    records_array[i] = record;
+                }
+            }
+        }
+    }
+
     /// Generate a comprehensive summary of the recording
     pub fn generate_summary(&self) -> RecordingSummary {
         let total_calls = self.total_records.load(Ordering::Relaxed);

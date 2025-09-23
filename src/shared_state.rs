@@ -5,7 +5,7 @@ use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
 use nix::sys::stat::Mode;
 use nix::fcntl::OFlag;
 use tracing::{debug, info, warn};
-use crate::recorder::CallRecordBuffer;
+use crate::recorder::{CallRecordBuffer, CallRecordBackup};
 
 const MAGIC_NUMBER: u64 = 0xDEADBEEF12345678;
 const VERSION: u32 = 1;
@@ -310,10 +310,17 @@ impl SharedStateManager {
                 // Validate and potentially reset stale state
                 unsafe {
                     if !(*state_ptr).is_valid() {
-                        warn!("shared memory validation failed, reinitializing");
+                        warn!("shared memory validation failed, backing up recording data before reinitializing");
+                        // backup existing recording data before reinitialization
+                        let recording_backup = (*state_ptr).call_recorder.backup_state();
+
                         std::ptr::write(state_ptr, SharedFaultState::new());
                         (*state_ptr).ref_count.store(1, Ordering::Relaxed);
                         (*state_ptr).update_writer_info();
+
+                        // restore the recording data
+                        (*state_ptr).call_recorder.restore_from_backup(recording_backup);
+                        info!("restored recording data after reinitialization");
                     } else if (*state_ptr).is_stale() {
                         (*state_ptr).reset_to_defaults();
                         (*state_ptr).ref_count.store(1, Ordering::Relaxed);
