@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::thread;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::commands::{Command, Response, State};
 use crate::state::LOCAL_STATE;
@@ -317,9 +317,8 @@ pub fn start_file_watcher() {
     use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use std::path::Path;
     use std::sync::mpsc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::io::{BufRead, BufReader};
-    use std::fs::File;
+
+    use std::sync::atomic::AtomicU64;
 
     // Track last processed timestamp to avoid duplicates
     static LAST_PROCESSED: AtomicU64 = AtomicU64::new(0);

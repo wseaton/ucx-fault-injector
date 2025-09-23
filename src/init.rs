@@ -105,14 +105,31 @@ pub fn init_fault_injector() {
 
     let current_pid = std::process::id();
 
-    // Check if already initialized using file locking
-    if is_already_initialized() {
-        info!(pid = current_pid, "UCX fault injector already initialized, skipping");
-        return;
-    }
+    // Check if function interception is already initialized using file locking
+    let function_intercept_already_initialized = is_already_initialized();
 
-    info!("UCX fault injector loaded (Rust version)");
-    info!(pid = current_pid, "initialization starting");
+    if !function_intercept_already_initialized {
+        info!("UCX fault injector loaded (Rust version)");
+        info!(pid = current_pid, "initialization starting");
+
+        // Force initialization of real functions to check symbol loading
+        debug!("initializing real UCX function pointer");
+        init_real_ucp_get_nbx();
+
+        // Print detailed debug info if debug mode is enabled
+        if DEBUG_ENABLED.load(Ordering::Relaxed) {
+            print_library_debug_info();
+        }
+
+        // register atexit handler as backup cleanup mechanism
+        unsafe {
+            libc::atexit(atexit_cleanup);
+        }
+
+        info!("UCX fault injector function interception initialization complete");
+    } else {
+        info!(pid = current_pid, "UCX fault injector function interception already initialized, skipping function setup");
+    }
 
     // check for debug mode
     if std::env::var("UCX_FAULT_DEBUG").is_ok() {
@@ -122,7 +139,7 @@ pub fn init_fault_injector() {
 
     // shared state removed - using local state only for simplicity and reliability
 
-    // initialize local state (still used for ZMQ-based configuration)
+    // Always initialize local state for each process (needed for file watcher)
     let _ = &*LOCAL_STATE; // Force initialization
     let state = get_current_state();
     info!(
@@ -134,34 +151,24 @@ pub fn init_fault_injector() {
         "local process state initialized"
     );
 
-    // start file watcher
+    // Always start file watcher for each process - this ensures commands reach all PIDs
     info!("starting file watcher for commands");
     start_file_watcher();
     info!(command_file = "/tmp/ucx-fault-commands", "file watcher started");
 
-    info!("file-based commands:");
-    info!("  Use ucx-fault-client to send commands via file");
-    info!("  Examples: ./ucx-fault-client toggle");
-    info!("           ./ucx-fault-client probability 50");
-    info!("           ./ucx-fault-client record-dump");
-    info!("           ./ucx-fault-client status");
-
-    // Force initialization of real functions to check symbol loading
-    debug!("initializing real UCX function pointer");
-    init_real_ucp_get_nbx();
-
-    // Print detailed debug info if debug mode is enabled
-    if DEBUG_ENABLED.load(Ordering::Relaxed) {
-        print_library_debug_info();
+    if !function_intercept_already_initialized {
+        info!("file-based commands:");
+        info!("  Use ucx-fault-client to send commands via file");
+        info!("  Examples: ./ucx-fault-client toggle");
+        info!("           ./ucx-fault-client probability 50");
+        info!("           ./ucx-fault-client record-dump");
+        info!("           ./ucx-fault-client status");
     }
 
-    // register atexit handler as backup cleanup mechanism
-    unsafe {
-        libc::atexit(atexit_cleanup);
+    info!(pid = current_pid, "UCX fault injector process initialization complete");
+    if !function_intercept_already_initialized {
+        info!("to enable debug output, set UCX_FAULT_DEBUG=1 in environment");
     }
-
-    info!("UCX fault injector initialization complete");
-    info!("to enable debug output, set UCX_FAULT_DEBUG=1 in environment");
 }
 
 // automatic initialization via constructor (disabled during tests)
