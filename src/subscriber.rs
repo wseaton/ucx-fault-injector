@@ -253,8 +253,13 @@ pub fn start_zmq_subscriber() {
 
                     match serde_json::from_str::<Command>(&msg) {
                         Ok(cmd) => {
+                            let is_status_cmd = cmd.command == "status" || cmd.command == "stats";
                             let response = handle_command(cmd);
-                            debug!(pid = std::process::id(), response = %response.message, "processed command");
+                            if is_status_cmd {
+                                info!(pid = std::process::id(), response = %response.message, state = ?response.state, "processed command");
+                            } else {
+                                info!(pid = std::process::id(), response = %response.message, "processed command");
+                            }
                         }
                         Err(e) => {
                             warn!(error = %e, "invalid JSON");
