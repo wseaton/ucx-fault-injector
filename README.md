@@ -17,6 +17,7 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 
 **Control faults in real-time:**
 ```bash
+# Fault injection commands
 ./target/release/ucx-fault-client status                # Check status
 ./target/release/ucx-fault-client toggle                # Enable/disable
 ./target/release/ucx-fault-client probability 50        # Set 50% fault rate
@@ -24,7 +25,14 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 ./target/release/ucx-fault-client strategy XOOOOXOO     # Use pattern-based faults
 ./target/release/ucx-fault-client reset                 # Reset defaults
 
-# NEW: Error code pools (see Error Code Pools section)
+# Recording & replay commands
+./target/release/ucx-fault-client record-toggle on      # Enable call recording
+./target/release/ucx-fault-client record-dump summary   # Show recording statistics
+./target/release/ucx-fault-client record-dump pattern   # Export fault pattern
+./target/release/ucx-fault-client replay                # Replay recorded pattern
+./target/release/ucx-fault-client record-clear          # Clear recorded data
+
+# Error code pools (see Error Code Pools section)
 ./target/release/ucx-fault-client error-codes -3,-6,-20 # Set custom error codes
 ```
 
@@ -95,6 +103,113 @@ By default, strategies use these error codes:
 **Behavior:**
 - **Random strategy**: Randomly selects error codes from the pool when faults are injected
 - **Pattern strategy**: Cycles through error codes based on pattern position (each 'X' gets the next error code)
+
+## Call Recording & Replay
+
+The fault injector now supports recording UCX calls and their fault injection decisions, enabling pattern replay and analysis.
+
+### Recording Commands
+
+**Enable/disable recording:**
+```bash
+./target/release/ucx-fault-client record-toggle         # Toggle current state
+./target/release/ucx-fault-client record-toggle on      # Enable recording
+./target/release/ucx-fault-client record-toggle off     # Disable recording
+```
+
+**Export recorded data:**
+```bash
+# High-level statistics (default)
+./target/release/ucx-fault-client record-dump summary
+
+# Fault pattern and error codes for replay
+./target/release/ucx-fault-client record-dump pattern
+
+# Detailed call records
+./target/release/ucx-fault-client record-dump records
+
+# Last N call records
+./target/release/ucx-fault-client record-dump-count 50
+```
+
+**Manage recordings:**
+```bash
+./target/release/ucx-fault-client record-clear          # Clear buffer
+./target/release/ucx-fault-client replay                # Replay pattern
+```
+
+### Export Formats
+
+**Summary format:**
+```json
+{
+  "recording_enabled": true,
+  "total_calls": 1250,
+  "fault_count": 312,
+  "fault_rate": 0.2496,
+  "pattern_length": 1000,
+  "unique_error_codes": ["-3", "-6", "-20"]
+}
+```
+
+**Pattern format:**
+```json
+{
+  "pattern": "OOXOOOXOOOOXOO",
+  "error_codes": [-3, -6, -20],
+  "total_calls": 14
+}
+```
+
+**Records format:**
+```json
+{
+  "records": [
+    {
+      "sequence": 1,
+      "timestamp_us": 1640995200000000,
+      "fault_injected": false,
+      "error_code": 0
+    },
+    {
+      "sequence": 2,
+      "timestamp_us": 1640995200001000,
+      "fault_injected": true,
+      "error_code": -3
+    }
+  ],
+  "total_count": 2
+}
+```
+
+### Workflow Examples
+
+**Record and replay a fault pattern:**
+```bash
+# 1. Start recording
+./target/release/ucx-fault-client record-toggle on
+
+# 2. Run your application with some fault injection
+./target/release/ucx-fault-client strategy random
+./target/release/ucx-fault-client probability 25
+# ... run your UCX application ...
+
+# 3. Export the pattern that was generated
+./target/release/ucx-fault-client record-dump pattern
+
+# 4. Replay the exact same pattern
+./target/release/ucx-fault-client replay
+# ... run your UCX application again ...
+```
+
+**Analyze call patterns:**
+```bash
+# Get high-level statistics
+./target/release/ucx-fault-client record-dump summary
+
+# Examine recent call details
+./target/release/ucx-fault-client record-dump-count 100
+```
 
 ### Available UCX Error Codes
 ```

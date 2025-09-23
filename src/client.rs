@@ -1,4 +1,4 @@
-use std::env;
+use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -10,30 +10,68 @@ struct Command {
     value: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recording_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_format: Option<String>,
 }
 
+#[derive(Parser)]
+#[command(name = "ucx-fault-client")]
+#[command(about = "UCX Fault Injector Client (ZMQ Broadcast)")]
+#[command(long_about = "A client for controlling fault injection in UCX applications")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-fn print_usage() {
-    println!("UCX Fault Injector Client (ZMQ Broadcast)");
-    println!("Usage: ucx-fault-client <COMMAND>");
-    println!();
-    println!("Commands:");
-    println!("  toggle                 Toggle fault injection on/off");
-    println!("  scenario <0|1|2>       Set fault scenario (0=network, 1=timeout, 2=memory)");
-    println!("  probability <0-100>    Set fault injection probability");
-    println!("  strategy <PATTERN>     Set fault strategy:");
-    println!("                           'random' - use probability-based randomization");
-    println!("                           'XOOOOXOO...' - pattern where X=fault, O=pass");
-    println!("  reset                  Reset to default settings");
-    println!("  status                 Show current state (broadcasts only)");
-    println!();
-    println!("Examples:");
-    println!("  ucx-fault-client toggle");
-    println!("  ucx-fault-client scenario 1");
-    println!("  ucx-fault-client probability 25");
-    println!("  ucx-fault-client strategy random");
-    println!("  ucx-fault-client strategy XOOOOOOXOOOOO");
-    println!("  ucx-fault-client reset");
+#[derive(Subcommand)]
+enum Commands {
+    /// Toggle fault injection on/off
+    Toggle,
+    /// Set fault scenario (0=network, 1=timeout, 2=memory)
+    Scenario {
+        /// Scenario number (0, 1, or 2)
+        #[arg(value_parser = clap::value_parser!(u32).range(0..=2))]
+        scenario: u32,
+    },
+    /// Set fault injection probability (0-100)
+    Probability {
+        /// Probability percentage (0-100)
+        #[arg(value_parser = clap::value_parser!(u32).range(0..=100))]
+        probability: u32,
+    },
+    /// Set fault strategy pattern
+    Strategy {
+        /// Pattern: 'random' for probability-based, or pattern like 'XOOOOXOO' where X=fault, O=pass
+        pattern: String,
+    },
+    /// Reset to default settings
+    Reset,
+    /// Show current state (broadcasts only)
+    Status,
+    /// Toggle call recording on/off
+    RecordToggle {
+        /// Enable or disable recording (optional - toggles if not specified)
+        #[arg(value_parser = clap::value_parser!(bool))]
+        enabled: Option<bool>,
+    },
+    /// Clear recorded call buffer
+    RecordClear,
+    /// Dump recorded calls in specified format
+    RecordDump {
+        /// Output format
+        #[arg(default_value = "summary")]
+        #[arg(value_parser = ["summary", "pattern", "records"])]
+        format: String,
+    },
+    /// Dump last N call records (implies 'records' format)
+    RecordDumpCount {
+        /// Number of records to dump
+        count: u32,
+    },
+    /// Replay recorded fault pattern
+    Replay,
 }
 
 
@@ -60,106 +98,97 @@ fn send_command_zmq(command: Command) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() < 2 {
-        print_usage();
-        std::process::exit(1);
-    }
-
-    let mut command_args = Vec::new();
-
-    // Parse arguments
-    for arg in &args[1..] {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            _ => {
-                command_args.push(arg.clone());
-            }
-        }
-    }
-
-    if command_args.is_empty() {
-        eprintln!("Error: No command specified");
-        print_usage();
-        std::process::exit(1);
-    }
-
-
-    // Parse command
-    let command = match command_args[0].as_str() {
-        "toggle" => Command {
+    let command = match cli.command {
+        Commands::Toggle => Command {
             command: "toggle".to_string(),
             scenario: None,
             value: None,
             pattern: None,
+            recording_enabled: None,
+            export_format: None,
         },
-        "scenario" => {
-            if command_args.len() < 2 {
-                eprintln!("Error: scenario command requires a value (0, 1, or 2)");
-                std::process::exit(1);
-            }
-            let scenario_value = command_args[1].parse().unwrap_or_else(|_| {
-                eprintln!("Error: Invalid scenario value. Must be 0, 1, or 2");
-                std::process::exit(1);
-            });
-            Command {
-                command: "set_scenario".to_string(),
-                scenario: Some(scenario_value),
-                value: None,
-                pattern: None,
-            }
+        Commands::Scenario { scenario } => Command {
+            command: "set_scenario".to_string(),
+            scenario: Some(scenario),
+            value: None,
+            pattern: None,
+            recording_enabled: None,
+            export_format: None,
         },
-        "probability" => {
-            if command_args.len() < 2 {
-                eprintln!("Error: probability command requires a value (0-100)");
-                std::process::exit(1);
-            }
-            let prob_value = command_args[1].parse().unwrap_or_else(|_| {
-                eprintln!("Error: Invalid probability value. Must be 0-100");
-                std::process::exit(1);
-            });
-            Command {
-                command: "set_probability".to_string(),
-                scenario: None,
-                value: Some(prob_value),
-                pattern: None,
-            }
+        Commands::Probability { probability } => Command {
+            command: "set_probability".to_string(),
+            scenario: None,
+            value: Some(probability),
+            pattern: None,
+            recording_enabled: None,
+            export_format: None,
         },
-        "strategy" => {
-            if command_args.len() < 2 {
-                eprintln!("Error: strategy command requires a pattern");
-                eprintln!("  Use 'random' for probability-based faults");
-                eprintln!("  Use pattern like 'XOOOOXOO' where X=fault, O=pass");
-                std::process::exit(1);
-            }
-            Command {
-                command: "set_strategy".to_string(),
-                scenario: None,
-                value: None,
-                pattern: Some(command_args[1].clone()),
-            }
+        Commands::Strategy { pattern } => Command {
+            command: "set_strategy".to_string(),
+            scenario: None,
+            value: None,
+            pattern: Some(pattern),
+            recording_enabled: None,
+            export_format: None,
         },
-        "reset" => Command {
+        Commands::Reset => Command {
             command: "reset".to_string(),
             scenario: None,
             value: None,
             pattern: None,
+            recording_enabled: None,
+            export_format: None,
         },
-        "status" => Command {
+        Commands::Status => Command {
             command: "status".to_string(),
             scenario: None,
             value: None,
             pattern: None,
+            recording_enabled: None,
+            export_format: None,
         },
-        _ => {
-            eprintln!("Error: Unknown command '{}'", command_args[0]);
-            print_usage();
-            std::process::exit(1);
-        }
+        Commands::RecordToggle { enabled } => Command {
+            command: "toggle_recording".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            recording_enabled: enabled,
+            export_format: None,
+        },
+        Commands::RecordClear => Command {
+            command: "clear_recording".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            recording_enabled: None,
+            export_format: None,
+        },
+        Commands::RecordDump { format } => Command {
+            command: "dump_recording".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            recording_enabled: None,
+            export_format: Some(format),
+        },
+        Commands::RecordDumpCount { count } => Command {
+            command: "dump_recording".to_string(),
+            scenario: None,
+            value: Some(count),
+            pattern: None,
+            recording_enabled: None,
+            export_format: Some("records".to_string()),
+        },
+        Commands::Replay => Command {
+            command: "replay_recording".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            recording_enabled: None,
+            export_format: None,
+        },
     };
 
     // Send command via ZMQ broadcast
