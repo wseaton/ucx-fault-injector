@@ -204,10 +204,14 @@ pub extern "C" fn ucp_get_nbx(
     if let Some(error_code) = should_inject_fault() {
         // Record the fault injection decision
         if let Some(shared) = get_shared_state() {
+            debug!("recording fault injection call #{}: error_code={}", call_num, error_code);
             shared.call_recorder.record_call(true, error_code);
             shared.faults_injected.fetch_add(1, Ordering::Relaxed);
             shared.ucp_get_nbx_faults.fetch_add(1, Ordering::Relaxed);
             shared.calls_since_fault.store(0, Ordering::Relaxed);
+            debug!("fault recorded successfully, total_records={}", shared.call_recorder.get_total_records());
+        } else {
+            warn!("cannot record fault injection call #{}: shared state not available", call_num);
         }
 
         warn!(error_code = error_code, "[FAULT] INJECTED: ucp_get_nbx error ({})", error_code);
@@ -219,8 +223,12 @@ pub extern "C" fn ucp_get_nbx(
     } else {
         // Record the successful call (no fault injected)
         if let Some(shared) = get_shared_state() {
+            debug!("recording successful call #{}", call_num);
             shared.call_recorder.record_call(false, 0); // 0 is placeholder, not used for success
             shared.calls_since_fault.fetch_add(1, Ordering::Relaxed);
+            debug!("success recorded, total_records={}", shared.call_recorder.get_total_records());
+        } else {
+            warn!("cannot record successful call #{}: shared state not available", call_num);
         }
     }
 
