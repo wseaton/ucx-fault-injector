@@ -46,7 +46,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
             info!("RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
 
             // First, try to find where UCX is already loaded by reading memory maps
-            let ucx_lib_paths = Vec::new();
+            let mut ucx_lib_paths = Vec::new();
 
             #[cfg(target_os = "linux")]
             {
