@@ -4,7 +4,7 @@ use libc::c_void;
 use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
 use nix::sys::stat::Mode;
 use nix::fcntl::OFlag;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 const MAGIC_NUMBER: u64 = 0xDEADBEEF12345678;
 const VERSION: u32 = 1;
@@ -86,15 +86,29 @@ impl SharedFaultState {
         self.version.load(Ordering::Relaxed) == VERSION
     }
 
-    // Check if the last writer process is still alive
+    // Check if the shared memory appears to be abandoned
     pub fn is_stale(&self) -> bool {
+        let ref_count = self.ref_count.load(Ordering::Relaxed);
+
+        // If ref_count is 0 and we detect no active processes, consider it stale
+        if ref_count == 0 {
+            let last_update = self.last_update_time.load(Ordering::Relaxed);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Consider stale if ref_count is 0 and last update was > 60 seconds ago
+            return now.saturating_sub(last_update) > 60;
+        }
+
+        // Also check if the last writer process is still alive (legacy check)
         let pid = self.last_writer_pid.load(Ordering::Relaxed);
         if pid <= 0 {
             return false; // No previous writer
         }
 
         // Check if process still exists using kill(pid, 0)
-        // Return false on error (assume process is alive)
         unsafe {
             libc::kill(pid, 0) != 0 && nix::errno::Errno::last() == nix::errno::Errno::ESRCH
         }
@@ -333,33 +347,24 @@ impl Drop for SharedStateManager {
             return;
         }
 
-        debug!("cleaning up shared memory");
-
-        // Atomic decrement and check if we should cleanup
-        // Use AcqRel to ensure proper synchronization with other processes
-        let prev_refs = unsafe {
-            (*self.ptr).ref_count.fetch_sub(1, Ordering::AcqRel)
-        };
-
-        let should_cleanup = prev_refs == 1; // We were the last reference
-        debug!(prev_refs, should_cleanup, "decremented reference count");
+        // Just decrement reference count and unmap from this process
+        // NEVER remove the shared memory segment during normal cleanup
+        // This prevents the vLLM subprocess inspection issue where the first
+        // process creates shared memory, exits, and removes it before workers start
+        unsafe {
+            (*self.ptr).ref_count.fetch_sub(1, Ordering::AcqRel);
+        }
 
         // Unmap the memory from this process (always safe)
-        if let Err(e) = unsafe { munmap(std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void), self.size) } {
-            error!(error = %e, "failed to unmap shared memory");
+        if let Err(_) = unsafe { munmap(std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void), self.size) } {
+            // Silent failure during cleanup to avoid logging issues during destruction
         }
 
-        // Only cleanup shared memory segment if we were the last process
-        // Use double-check with CAS to avoid race where another process joins after decrement
-        if should_cleanup {
-            info!("attempting to remove shared memory segment as last process");
-            if let Err(e) = shm_unlink(SHM_NAME) {
-                // This is expected if another process already cleaned up
-                debug!(error = %e, "failed to unlink shared memory (likely already cleaned up by another process)");
-            } else {
-                info!("successfully removed shared memory segment");
-            }
-        }
+        // Let the shared memory segment persist - it will be cleaned up:
+        // 1. By the OS when the system reboots
+        // 2. By explicit cleanup tools if needed
+        // 3. By the next process that detects all references are stale
+        // This is much safer for multi-process scenarios like vLLM
     }
 }
 
@@ -374,5 +379,15 @@ pub fn get_shared_state() -> Option<&'static SharedFaultState> {
 pub fn init_shared_state() -> Result<(), Box<dyn std::error::Error>> {
     SHARED_STATE_MANAGER.get_or_try_init(|| SharedStateManager::new())?;
     info!("shared state initialized successfully");
+    Ok(())
+}
+
+// Force cleanup of shared memory segment (for debugging/testing)
+pub fn force_cleanup_shared_memory() -> Result<(), Box<dyn std::error::Error>> {
+    if let Err(e) = shm_unlink(SHM_NAME) {
+        debug!(error = %e, "failed to force cleanup shared memory (may not exist)");
+    } else {
+        info!("forced cleanup of shared memory segment");
+    }
     Ok(())
 }

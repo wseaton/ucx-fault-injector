@@ -190,7 +190,8 @@ fn perform_cleanup() {
     if CLEANUP_IN_PROGRESS.compare_exchange(
         false, true, Ordering::AcqRel, Ordering::Relaxed
     ).is_ok() {
-        info!(pid = std::process::id(), "UCX fault injector cleanup starting");
+        // Avoid logging during destruction as it might trigger thread-local access
+        // that can panic if TLS is already destroyed
 
         // The SharedStateManager Drop implementation will handle:
         // - Decrementing reference counter in shared memory
@@ -198,13 +199,10 @@ fn perform_cleanup() {
         // - Removing shared memory segment if this is the last process
 
         // Note: Local state cleanup happens automatically via Drop impls
-        info!(pid = std::process::id(), "UCX fault injector cleanup complete");
 
         CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
-    } else {
-        // Another thread/signal handler is already doing cleanup
-        debug!(pid = std::process::id(), "cleanup already in progress, skipping");
     }
+    // Silent cleanup - don't log anything as it might trigger TLS access during destruction
 }
 
 // register atexit handler as backup cleanup (called in all processes)

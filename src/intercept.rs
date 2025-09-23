@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use tracing::{debug, error, info, warn};
 
 use crate::ucx::{UcsStatus, UcsStatusPtr, UcpEpH, UcpRkeyH, UcpRequestParamT, ucs_status_to_ptr};
-use crate::state::{DEBUG_ENABLED, IN_INTERCEPT, LOCAL_STATE};
+use crate::state::{DEBUG_ENABLED, LOCAL_STATE, is_in_intercept, set_in_intercept};
 use crate::shared_state::get_shared_state;
 use crate::subscriber::get_current_state;
 
@@ -168,11 +168,7 @@ pub extern "C" fn ucp_get_nbx(
     param: UcpRequestParamT,
 ) -> UcsStatusPtr {
     // Check reentrancy guard to prevent infinite recursion
-    let already_in_intercept = IN_INTERCEPT.with(|flag| {
-        *flag.borrow()
-    });
-
-    if already_in_intercept {
+    if is_in_intercept() {
         // We're being called recursively - this shouldn't happen if we resolve correctly
         // but as a safety fallback, return success to avoid infinite recursion
         warn!("RECURSION DETECTED: ucp_get_nbx called while already intercepting");
@@ -180,9 +176,7 @@ pub extern "C" fn ucp_get_nbx(
     }
 
     // Set reentrancy guard
-    IN_INTERCEPT.with(|flag| {
-        *flag.borrow_mut() = true;
-    });
+    set_in_intercept(true);
 
     // Update shared statistics (zero-overhead atomic increments)
     if let Some(shared) = get_shared_state() {
@@ -219,9 +213,7 @@ pub extern "C" fn ucp_get_nbx(
         let fault_result = ucs_status_to_ptr(error_code);
 
         // Clear reentrancy guard before returning fault result
-        IN_INTERCEPT.with(|flag| {
-            *flag.borrow_mut() = false;
-        });
+        set_in_intercept(false);
         return fault_result;
     } else {
         // No fault injected, increment calls since last fault
@@ -260,9 +252,7 @@ pub extern "C" fn ucp_get_nbx(
     };
 
     // Clear reentrancy guard before returning
-    IN_INTERCEPT.with(|flag| {
-        *flag.borrow_mut() = false;
-    });
+    set_in_intercept(false);
 
     result
 }
