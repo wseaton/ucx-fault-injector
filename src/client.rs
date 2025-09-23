@@ -86,7 +86,8 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     // Create lock file for atomic writes
     let lock_fd = OpenOptions::new()
         .create(true)
-        .write(true)
+        .truncate(false)
+	.write(true)
         .open(lock_file)?;
 
     // Acquire exclusive lock
@@ -110,8 +111,9 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     // Append command to file
     let mut file = OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(&command_file)?;
+        .truncate(false)
+	.append(true)
+        .open(command_file)?;
 
     writeln!(file, "{}", command_json)?;
     file.sync_all()?;
