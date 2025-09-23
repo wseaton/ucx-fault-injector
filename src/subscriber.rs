@@ -313,53 +313,138 @@ pub fn handle_command(cmd: Command) -> Response {
     }
 }
 
-pub fn start_zmq_subscriber() {
-    thread::spawn(move || {
-        let ctx = zmq::Context::new();
-        let subscriber = ctx.socket(zmq::SUB).unwrap();
+pub fn start_file_watcher() {
+    use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::io::{BufRead, BufReader};
+    use std::fs::File;
 
-        // Connect to the broadcast port
-        let broadcast_addr = "tcp://127.0.0.1:15559";
-        if let Err(e) = subscriber.connect(broadcast_addr) {
-            error!(broadcast_addr, error = %e, "failed to connect");
+    // Track last processed timestamp to avoid duplicates
+    static LAST_PROCESSED: AtomicU64 = AtomicU64::new(0);
+
+    thread::spawn(move || {
+        let command_file = "/tmp/ucx-fault-commands";
+        let command_path = Path::new(command_file);
+
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = command_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        // Create empty file if it doesn't exist
+        if !command_path.exists() {
+            std::fs::write(command_file, "").ok();
+        }
+
+        // Set up file watcher
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                error!(error = %e, "failed to create file watcher");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(command_path, RecursiveMode::NonRecursive) {
+            error!(command_file, error = %e, "failed to watch command file");
             return;
         }
 
-        // Subscribe to all messages
-        subscriber.set_subscribe(b"").unwrap();
+        info!(command_file, pid = std::process::id(), "file watcher started");
 
-        info!(broadcast_addr, pid = std::process::id(), "subscriber listening");
+        // Process initial file content
+        process_command_file(command_file, &LAST_PROCESSED);
 
-        loop {
-            match subscriber.recv_string(0) {
-                Ok(Ok(msg)) => {
-                    debug!(pid = std::process::id(), message = %msg, "received message");
-
-                    match serde_json::from_str::<Command>(&msg) {
-                        Ok(cmd) => {
-                            let is_status_cmd = cmd.command == "status" || cmd.command == "stats";
-                            let response = handle_command(cmd);
-                            if is_status_cmd {
-                                info!(pid = std::process::id(), response = %response.message, state = ?response.state, "processed command");
-                            } else if let Some(recording_data) = &response.recording_data {
-                                info!(pid = std::process::id(), response = %response.message, recording_data = %recording_data, "processed command");
-                            } else {
-                                info!(pid = std::process::id(), response = %response.message, "processed command");
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "invalid JSON");
-                        }
-                    }
+        // Watch for file changes
+        for res in rx {
+            match res {
+                Ok(Event { kind: EventKind::Modify(_), .. }) => {
+                    process_command_file(command_file, &LAST_PROCESSED);
                 }
-                Ok(Err(e)) => {
-                    error!(error = ?e, "UTF-8 decode error");
-                }
+                Ok(_) => {} // Ignore other events
                 Err(e) => {
-                    error!(error = %e, "receive error");
-                    break;
+                    error!(error = %e, "file watch error");
                 }
             }
         }
     });
+}
+
+fn process_command_file(file_path: &str, last_processed: &std::sync::atomic::AtomicU64) {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::sync::atomic::Ordering;
+
+    let file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return, // File doesn't exist or can't be read
+    };
+
+    let reader = BufReader::new(file);
+    let current_last = last_processed.load(Ordering::Relaxed);
+    let mut new_last = current_last;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l.trim().to_string(),
+            Err(_) => continue,
+        };
+
+        if line.is_empty() {
+            continue;
+        }
+
+        // Parse timestamped command
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, line = %line, "failed to parse command line");
+                continue;
+            }
+        };
+
+        let timestamp = match parsed.get("timestamp").and_then(|t| t.as_u64()) {
+            Some(ts) => ts,
+            None => {
+                warn!(line = %line, "command missing timestamp");
+                continue;
+            }
+        };
+
+        // Skip if we've already processed this command
+        if timestamp <= current_last {
+            continue;
+        }
+
+        // Convert to Command struct
+        let cmd: Command = match serde_json::from_value(parsed) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, line = %line, "failed to parse command");
+                continue;
+            }
+        };
+
+        // Process command
+        let is_status_cmd = cmd.command == "status" || cmd.command == "stats";
+        let response = handle_command(cmd);
+
+        if is_status_cmd {
+            info!(pid = std::process::id(), response = %response.message, state = ?response.state, "processed file command");
+        } else if let Some(recording_data) = &response.recording_data {
+            info!(pid = std::process::id(), response = %response.message, recording_data = %recording_data, "processed file command");
+        } else {
+            info!(pid = std::process::id(), response = %response.message, "processed file command");
+        }
+
+        new_last = timestamp;
+    }
+
+    // Update last processed timestamp
+    if new_last > current_last {
+        last_processed.store(new_last, Ordering::Relaxed);
+    }
 }

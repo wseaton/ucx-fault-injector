@@ -5,7 +5,7 @@ use nix::fcntl::{Flock, FlockArg};
 use tracing::{debug, error, info};
 
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
-use crate::subscriber::{get_current_state, start_zmq_subscriber};
+use crate::subscriber::{get_current_state, start_file_watcher};
 use crate::intercept::init_real_ucp_get_nbx;
 
 // initialize tracing subscriber
@@ -134,22 +134,17 @@ pub fn init_fault_injector() {
         "local process state initialized"
     );
 
-    // start ZMQ subscriber
-    info!("starting ZMQ subscriber");
-    start_zmq_subscriber();
-    info!(address = "tcp://127.0.0.1:15559", "ZMQ subscriber started");
+    // start file watcher
+    info!("starting file watcher for commands");
+    start_file_watcher();
+    info!(command_file = "/tmp/ucx-fault-commands", "file watcher started");
 
-    info!("ZMQ broadcast commands:");
-    info!("  {{\"command\": \"toggle\"}} - toggle fault injection");
-    info!("  {{\"command\": \"set_probability\", \"value\": 0-100}} - set fault probability");
-    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"random\"}} - use random strategy");
-    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"XOOOOXOO\"}} - use pattern strategy");
-    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"random\", \"error_codes\": [-3,-6,-20]}} - random with error codes");
-    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"XOX\", \"error_codes\": [-3,-6]}} - pattern with error codes");
-    info!("  {{\"command\": \"set_error_codes\", \"error_codes\": [-3,-6,-20]}} - update error codes for current strategy");
-    info!("  {{\"command\": \"reset\"}} - reset to defaults");
-    info!("  {{\"command\": \"status\"}} - get current state");
-    info!("  {{\"command\": \"stats\"}} - view shared memory statistics");
+    info!("file-based commands:");
+    info!("  Use ucx-fault-client to send commands via file");
+    info!("  Examples: ./ucx-fault-client toggle");
+    info!("           ./ucx-fault-client probability 50");
+    info!("           ./ucx-fault-client record-dump");
+    info!("           ./ucx-fault-client status");
 
     // Force initialization of real functions to check symbol loading
     debug!("initializing real UCX function pointer");

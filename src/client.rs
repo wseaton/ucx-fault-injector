@@ -75,24 +75,50 @@ enum Commands {
 }
 
 
-fn send_command_zmq(command: Command) -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = zmq::Context::new();
-    let publisher = ctx.socket(zmq::PUB)?;
+fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use nix::fcntl::{Flock, FlockArg};
 
-    let broadcast_addr = "tcp://127.0.0.1:15559";
-    publisher.bind(broadcast_addr)?;
+    let command_file = "/tmp/ucx-fault-commands";
+    let lock_file = "/tmp/ucx-fault-commands.lock";
 
-    // Give ZMQ time to establish connections
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Create lock file for atomic writes
+    let lock_fd = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_file)?;
 
-    let command_json = serde_json::to_string(&command)?;
-    publisher.send(&command_json, 0)?;
+    // Acquire exclusive lock
+    let _lock = Flock::lock(lock_fd, FlockArg::LockExclusive)
+        .map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
-    println!("Broadcasting command: {}", command_json);
-    println!("Publisher bound to: {}", broadcast_addr);
+    // Create timestamped command
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let timestamped_command = serde_json::json!({
+        "timestamp": timestamp,
+        "command": command.command,
+        "value": command.value,
+        "pattern": command.pattern,
+        "recording_enabled": command.recording_enabled,
+        "export_format": command.export_format,
+        "scenario": command.scenario
+    });
 
-    // Give time for message to be delivered
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let command_json = serde_json::to_string(&timestamped_command)?;
+
+    // Append command to file
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(command_file)?;
+
+    writeln!(file, "{}", command_json)?;
+    file.sync_all()?;
+
+    println!("Command written to file: {}", command_json);
+    println!("Command file: {}", command_file);
 
     Ok(())
 }
@@ -191,8 +217,8 @@ fn main() {
         },
     };
 
-    // Send command via ZMQ broadcast
-    match send_command_zmq(command) {
+    // Send command via file
+    match send_command_file(command) {
         Ok(()) => {
             println!("Command broadcast successfully");
         }
