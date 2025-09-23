@@ -1,7 +1,7 @@
 use libc::{c_void, size_t, c_int};
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Mutex, Arc};
+use std::sync::Mutex;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use nix::fcntl::{Flock, FlockArg};
@@ -17,9 +17,33 @@ type UcpRkeyH = *mut c_void;
 type UcpRequestParamT = *const c_void;
 
 // Correct UCX error codes from ucx/src/ucs/type/status.h
+const UCS_OK: UcsStatus = 0;
+const UCS_INPROGRESS: UcsStatus = 1;
+const UCS_ERR_NO_MESSAGE: UcsStatus = -1;
+const UCS_ERR_NO_RESOURCE: UcsStatus = -2;
 const UCS_ERR_IO_ERROR: UcsStatus = -3;
+const UCS_ERR_NO_MEMORY: UcsStatus = -4;
+const UCS_ERR_INVALID_PARAM: UcsStatus = -5;
 const UCS_ERR_UNREACHABLE: UcsStatus = -6;
+const UCS_ERR_INVALID_ADDR: UcsStatus = -7;
+const UCS_ERR_NOT_IMPLEMENTED: UcsStatus = -8;
+const UCS_ERR_MESSAGE_TRUNCATED: UcsStatus = -9;
+const UCS_ERR_NO_PROGRESS: UcsStatus = -10;
+const UCS_ERR_BUFFER_TOO_SMALL: UcsStatus = -11;
+const UCS_ERR_NO_ELEM: UcsStatus = -12;
+const UCS_ERR_SOME_CONNECTS_FAILED: UcsStatus = -13;
+const UCS_ERR_NO_DEVICE: UcsStatus = -14;
+const UCS_ERR_BUSY: UcsStatus = -15;
+const UCS_ERR_CANCELED: UcsStatus = -16;
+const UCS_ERR_SHMEM_SEGMENT: UcsStatus = -17;
+const UCS_ERR_ALREADY_EXISTS: UcsStatus = -18;
+const UCS_ERR_OUT_OF_RANGE: UcsStatus = -19;
 const UCS_ERR_TIMED_OUT: UcsStatus = -20;
+const UCS_ERR_EXCEEDS_LIMIT: UcsStatus = -21;
+const UCS_ERR_UNSUPPORTED: UcsStatus = -22;
+const UCS_ERR_REJECTED: UcsStatus = -23;
+const UCS_ERR_NOT_CONNECTED: UcsStatus = -24;
+const UCS_ERR_CONNECTION_RESET: UcsStatus = -25;
 
 // UCX pointer encoding - simply cast the negative status code to a pointer
 // This follows UCS_STATUS_PTR(_status) macro: ((void*)(intptr_t)(_status))
@@ -27,19 +51,164 @@ fn ucs_status_to_ptr(status: UcsStatus) -> *mut c_void {
     status as isize as *mut c_void
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum FaultStrategy {
+    Random {
+        probability: u32,
+        error_codes: Vec<UcsStatus>,
+    },
+    Pattern {
+        pattern: String,
+        error_codes: Vec<UcsStatus>,
+        current_position: usize,
+    },
+}
+
+impl FaultStrategy {
+    fn new_random(probability: u32) -> Self {
+        Self::Random {
+            probability,
+            error_codes: vec![UCS_ERR_IO_ERROR, UCS_ERR_UNREACHABLE, UCS_ERR_TIMED_OUT],
+        }
+    }
+
+    fn new_random_with_codes(probability: u32, error_codes: Vec<UcsStatus>) -> Self {
+        let codes = if error_codes.is_empty() {
+            vec![UCS_ERR_IO_ERROR, UCS_ERR_UNREACHABLE, UCS_ERR_TIMED_OUT]
+        } else {
+            error_codes
+        };
+        Self::Random { probability, error_codes: codes }
+    }
+
+    fn new_pattern(pattern: String) -> Self {
+        Self::Pattern {
+            pattern,
+            error_codes: vec![UCS_ERR_IO_ERROR, UCS_ERR_UNREACHABLE, UCS_ERR_TIMED_OUT],
+            current_position: 0,
+        }
+    }
+
+    fn new_pattern_with_codes(pattern: String, error_codes: Vec<UcsStatus>) -> Self {
+        let codes = if error_codes.is_empty() {
+            vec![UCS_ERR_IO_ERROR, UCS_ERR_UNREACHABLE, UCS_ERR_TIMED_OUT]
+        } else {
+            error_codes
+        };
+        Self::Pattern {
+            pattern,
+            error_codes: codes,
+            current_position: 0,
+        }
+    }
+
+    fn should_inject(&mut self) -> Option<UcsStatus> {
+        match self {
+            Self::Random { probability, error_codes } => {
+                if *probability == 0 || error_codes.is_empty() {
+                    return None;
+                }
+
+                // simple random check
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                use std::time::{SystemTime, UNIX_EPOCH};
+
+                let mut hasher = DefaultHasher::new();
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
+                let random = (hasher.finish() % 100) as u32;
+
+                if random < *probability {
+                    // randomly select an error code from the pool
+                    let code_index = (hasher.finish() % error_codes.len() as u64) as usize;
+                    Some(error_codes[code_index])
+                } else {
+                    None
+                }
+            }
+            Self::Pattern { pattern, error_codes, current_position } => {
+                if pattern.is_empty() || error_codes.is_empty() {
+                    return None;
+                }
+
+                let pattern_char = pattern.chars().nth(*current_position % pattern.len()).unwrap_or('O');
+                *current_position += 1;
+
+                if pattern_char == 'X' {
+                    // cycle through error codes based on position
+                    let code_index = (*current_position - 1) % error_codes.len();
+                    Some(error_codes[code_index])
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn set_probability(&mut self, probability: u32) {
+        if let Self::Random { probability: ref mut p, .. } = self {
+            *p = probability;
+        }
+    }
+
+    fn set_error_codes(&mut self, codes: Vec<UcsStatus>) {
+        let error_codes = if codes.is_empty() {
+            vec![UCS_ERR_IO_ERROR, UCS_ERR_UNREACHABLE, UCS_ERR_TIMED_OUT]
+        } else {
+            codes
+        };
+
+        match self {
+            Self::Random { error_codes: ref mut ec, .. } => {
+                *ec = error_codes;
+            }
+            Self::Pattern { error_codes: ref mut ec, .. } => {
+                *ec = error_codes;
+            }
+        }
+    }
+
+
+    fn get_probability(&self) -> Option<u32> {
+        match self {
+            Self::Random { probability, .. } => Some(*probability),
+            Self::Pattern { .. } => None,
+        }
+    }
+
+    fn get_error_codes(&self) -> &[UcsStatus] {
+        match self {
+            Self::Random { error_codes, .. } => error_codes,
+            Self::Pattern { error_codes, .. } => error_codes,
+        }
+    }
+
+    fn get_pattern(&self) -> Option<&str> {
+        match self {
+            Self::Random { .. } => None,
+            Self::Pattern { pattern, .. } => Some(pattern),
+        }
+    }
+
+    fn get_strategy_name(&self) -> &'static str {
+        match self {
+            Self::Random { .. } => "random",
+            Self::Pattern { .. } => "pattern",
+        }
+    }
+}
+
 // Local process state structure (no shared memory)
 struct LocalFaultState {
     enabled: AtomicBool,
-    scenario: AtomicU32,
-    probability: AtomicU32,
+    strategy: Mutex<FaultStrategy>,
 }
 
 impl LocalFaultState {
     fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),
-            scenario: AtomicU32::new(0),
-            probability: AtomicU32::new(25), // default 25%
+            strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
         }
     }
 }
@@ -55,15 +224,16 @@ static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // reentrancy guard to prevent infinite recursion
 thread_local! {
-    static IN_INTERCEPT: std::cell::RefCell<bool> = std::cell::RefCell::new(false);
+    static IN_INTERCEPT: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
 }
 
 // Socket API command and response structures
 #[derive(Deserialize)]
 struct Command {
     command: String,
-    scenario: Option<u32>,
     value: Option<u32>,
+    pattern: Option<String>,
+    error_codes: Option<Vec<i32>>,
 }
 
 #[derive(Serialize)]
@@ -76,8 +246,10 @@ struct Response {
 #[derive(Serialize)]
 struct State {
     enabled: bool,
-    scenario: u32,
     probability: u32,
+    strategy: String,
+    pattern: Option<String>,
+    error_codes: Vec<i32>,
 }
 
 
@@ -92,6 +264,7 @@ fn is_already_initialized() -> bool {
     // Try to open and lock the file
     match OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .mode(0o600)
         .open(&lock_file_path)
@@ -129,10 +302,6 @@ fn is_already_initialized() -> bool {
 // function pointers to real UCX functions - use atomic pointer to avoid deadlock
 static REAL_UCP_GET_NBX: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-struct RealFunctions {
-    // Only hook ucp_get_nbx for remote reads
-    ucp_get_nbx: Option<extern "C" fn(UcpEpH, *mut c_void, size_t, u64, UcpRkeyH, UcpRequestParamT) -> UcsStatusPtr>,
-}
 
 fn try_find_real_ucp_get_nbx() -> *mut c_void {
     use std::ffi::CString;
@@ -170,35 +339,58 @@ fn try_find_real_ucp_get_nbx() -> *mut c_void {
         if ptr.is_null() {
             info!("RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
 
-            // First, try to find where UCX is already loaded by reading /proc/self/maps
-            let mut ucx_lib_paths = Vec::new();
-            if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
-                for line in maps.lines() {
-                    if line.contains("libucp") {
-                        // Extract the library path from the maps line
-                        if let Some(path_start) = line.rfind(' ') {
-                            let path = &line[path_start + 1..];
-                            if path.starts_with('/') && !ucx_lib_paths.contains(&path.to_string()) {
-                                ucx_lib_paths.push(path.to_string());
-                                info!("Found UCX library in memory map: {}", path);
+            // First, try to find where UCX is already loaded by reading memory maps
+            let ucx_lib_paths = Vec::new();
+
+            #[cfg(target_os = "linux")]
+            {
+                if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+                    for line in maps.lines() {
+                        if line.contains("libucp") {
+                            // Extract the library path from the maps line
+                            if let Some(path_start) = line.rfind(' ') {
+                                let path = &line[path_start + 1..];
+                                if path.starts_with('/') && !ucx_lib_paths.contains(&path.to_string()) {
+                                    ucx_lib_paths.push(path.to_string());
+                                    info!("Found UCX library in memory map: {}", path);
+                                }
                             }
                         }
                     }
                 }
             }
 
+            #[cfg(target_os = "macos")]
+            {
+                // On macOS, we can't easily read memory maps like on Linux
+                // Instead, we'll rely on standard search paths
+                info!("macOS detected, using standard UCX search paths");
+            }
+
             // Add the found paths to our search list
             let mut ucx_lib_names = ucx_lib_paths;
 
             // Also try standard locations as fallback
+            #[cfg(target_os = "linux")]
             ucx_lib_names.extend([
                 "libucp.so".to_string(),
                 "libucp.so.0".to_string(),
                 "/usr/lib64/libucp.so".to_string(),
                 "/usr/local/lib/libucp.so".to_string(),
                 "/opt/ucx/lib/libucp.so".to_string(),
-                "libucp.dylib".to_string(), // macOS
             ]);
+
+            #[cfg(target_os = "macos")]
+            {
+                let home = std::env::var("HOME").unwrap_or_default();
+                ucx_lib_names.extend([
+                    "libucp.dylib".to_string(),
+                    "libucp.0.dylib".to_string(),
+                    "/usr/local/lib/libucp.dylib".to_string(),
+                    "/opt/homebrew/lib/libucp.dylib".to_string(),
+                    format!("{}/ucx/lib/libucp.dylib", home),
+                ]);
+            }
 
             for lib_name in &ucx_lib_names {
                 info!("Trying to load library: {}", lib_name);
@@ -246,34 +438,17 @@ fn init_real_ucp_get_nbx() {
     debug!(ptr_loaded = !ptr.is_null(), "real UCX function pointer stored during init");
 }
 
-impl RealFunctions {
-    fn new() -> Self {
-        // This is kept for backward compatibility but won't be used
-        Self {
-            ucp_get_nbx: None,
-        }
-    }
-
-    // Stub function that returns success when no real UCX function is available
-    extern "C" fn stub_ucp_get_nbx(
-        _ep: UcpEpH,
-        _buffer: *mut c_void,
-        _count: size_t,
-        _remote_addr: u64,
-        _rkey: UcpRkeyH,
-        _param: UcpRequestParamT,
-    ) -> UcsStatusPtr {
-        debug!("ucp_get_nbx stub called - returning success");
-        std::ptr::null_mut() // UCS_OK represented as null pointer
-    }
-}
 
 // Socket server functions for fault control
 fn get_current_state() -> State {
+    let strategy = LOCAL_STATE.strategy.lock().unwrap();
+
     State {
         enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
-        scenario: LOCAL_STATE.scenario.load(Ordering::Relaxed),
-        probability: LOCAL_STATE.probability.load(Ordering::Relaxed),
+        probability: strategy.get_probability().unwrap_or(0),
+        strategy: strategy.get_strategy_name().to_string(),
+        pattern: strategy.get_pattern().map(|s| s.to_string()),
+        error_codes: strategy.get_error_codes().to_vec(),
     }
 }
 
@@ -290,41 +465,11 @@ fn handle_command(cmd: Command) -> Response {
                 state: Some(get_current_state()),
             }
         }
-        "set_scenario" => {
-            if let Some(scenario) = cmd.scenario {
-                if scenario <= 2 {
-                    LOCAL_STATE.scenario.store(scenario, Ordering::Relaxed);
-                    let scenario_name = match scenario {
-                        0 => "NETWORK_ERROR",
-                        1 => "UNREACHABLE_ERROR",
-                        2 => "TIMEOUT_ERROR",
-                        _ => "UNKNOWN",
-                    };
-                    info!(scenario = scenario, scenario_name, "switched to scenario");
-                    Response {
-                        status: "ok".to_string(),
-                        message: format!("Scenario set to {} ({})", scenario, scenario_name),
-                        state: Some(get_current_state()),
-                    }
-                } else {
-                    Response {
-                        status: "error".to_string(),
-                        message: "Invalid scenario. Must be 0, 1, or 2".to_string(),
-                        state: None,
-                    }
-                }
-            } else {
-                Response {
-                    status: "error".to_string(),
-                    message: "Missing scenario parameter".to_string(),
-                    state: None,
-                }
-            }
-        }
         "set_probability" => {
             if let Some(value) = cmd.value {
                 if value <= 100 {
-                    LOCAL_STATE.probability.store(value, Ordering::Relaxed);
+                    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                    strategy.set_probability(value);
                     info!(probability = value, "probability set");
                     Response {
                         status: "ok".to_string(),
@@ -348,13 +493,79 @@ fn handle_command(cmd: Command) -> Response {
         }
         "reset" => {
             LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
-            LOCAL_STATE.scenario.store(0, Ordering::Relaxed);
-            LOCAL_STATE.probability.store(10, Ordering::Relaxed);
+
+            // Reset strategy to random with default probability
+            let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+            *strategy = FaultStrategy::new_random(25);
+
             info!("reset to defaults");
             Response {
                 status: "ok".to_string(),
                 message: "Reset to defaults".to_string(),
                 state: Some(get_current_state()),
+            }
+        }
+        "set_strategy" => {
+            if let Some(pattern) = cmd.pattern {
+                let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                let error_codes = cmd.error_codes.unwrap_or_default();
+
+                if pattern == "random" {
+                    let current_prob = strategy.get_probability().unwrap_or(25);
+                    if error_codes.is_empty() {
+                        *strategy = FaultStrategy::new_random(current_prob);
+                    } else {
+                        *strategy = FaultStrategy::new_random_with_codes(current_prob, error_codes);
+                    }
+                    info!("switched to random fault strategy");
+                    Response {
+                        status: "ok".to_string(),
+                        message: "Strategy set to random".to_string(),
+                        state: Some(get_current_state()),
+                    }
+                } else if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
+                    if error_codes.is_empty() {
+                        *strategy = FaultStrategy::new_pattern(pattern.clone());
+                    } else {
+                        *strategy = FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
+                    }
+                    info!(pattern = %pattern, "switched to pattern fault strategy");
+                    Response {
+                        status: "ok".to_string(),
+                        message: format!("Strategy set to pattern: {}", pattern),
+                        state: Some(get_current_state()),
+                    }
+                } else {
+                    Response {
+                        status: "error".to_string(),
+                        message: "Invalid pattern. Use 'random' or a pattern with only 'X' (fault) and 'O' (pass) characters".to_string(),
+                        state: None,
+                    }
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing pattern parameter".to_string(),
+                    state: None,
+                }
+            }
+        }
+        "set_error_codes" => {
+            if let Some(codes) = cmd.error_codes {
+                let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                strategy.set_error_codes(codes);
+                info!(error_codes = ?strategy.get_error_codes(), "error codes updated");
+                Response {
+                    status: "ok".to_string(),
+                    message: format!("Error codes set to: {:?}", strategy.get_error_codes()),
+                    state: Some(get_current_state()),
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing error_codes parameter".to_string(),
+                    state: None,
+                }
             }
         }
         "status" => {
@@ -456,10 +667,13 @@ fn init_fault_injector() {
 
     // initialize local state (much safer than shared memory)
     let _ = &*LOCAL_STATE; // Force initialization
+    let state = get_current_state();
     info!(
-        enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed),
-        scenario = LOCAL_STATE.scenario.load(Ordering::Relaxed),
-        probability = LOCAL_STATE.probability.load(Ordering::Relaxed),
+        enabled = state.enabled,
+        strategy = %state.strategy,
+        probability = state.probability,
+        pattern = ?state.pattern,
+        error_codes = ?state.error_codes,
         "local process state initialized"
     );
 
@@ -470,8 +684,12 @@ fn init_fault_injector() {
 
     info!("ZMQ broadcast commands:");
     info!("  {{\"command\": \"toggle\"}} - toggle fault injection");
-    info!("  {{\"command\": \"set_scenario\", \"scenario\": 0|1|2}} - set fault scenario");
     info!("  {{\"command\": \"set_probability\", \"value\": 0-100}} - set fault probability");
+    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"random\"}} - use random strategy");
+    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"XOOOOXOO\"}} - use pattern strategy");
+    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"random\", \"error_codes\": [-3,-6,-20]}} - random with error codes");
+    info!("  {{\"command\": \"set_strategy\", \"pattern\": \"XOX\", \"error_codes\": [-3,-6]}} - pattern with error codes");
+    info!("  {{\"command\": \"set_error_codes\", \"error_codes\": [-3,-6,-20]}} - update error codes for current strategy");
     info!("  {{\"command\": \"reset\"}} - reset to defaults");
     info!("  {{\"command\": \"status\"}} - get current state");
 
@@ -504,14 +722,14 @@ fn print_library_debug_info() {
 
     // Check if we can find UCX symbols using different methods
     unsafe {
-        let ucp_put_default = libc::dlsym(libc::RTLD_DEFAULT, b"ucp_put\0".as_ptr() as *const i8);
-        let ucp_put_next = libc::dlsym(libc::RTLD_NEXT, b"ucp_put\0".as_ptr() as *const i8);
+        let ucp_put_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_put".as_ptr() as *const i8);
+        let ucp_put_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_put".as_ptr() as *const i8);
 
         debug!(address = ?ucp_put_default, "ucp_put via RTLD_DEFAULT");
         debug!(address = ?ucp_put_next, "ucp_put via RTLD_NEXT");
 
-        let ucp_get_default = libc::dlsym(libc::RTLD_DEFAULT, b"ucp_get\0".as_ptr() as *const i8);
-        let ucp_get_next = libc::dlsym(libc::RTLD_NEXT, b"ucp_get\0".as_ptr() as *const i8);
+        let ucp_get_default = libc::dlsym(libc::RTLD_DEFAULT, c"ucp_get".as_ptr() as *const i8);
+        let ucp_get_next = libc::dlsym(libc::RTLD_NEXT, c"ucp_get".as_ptr() as *const i8);
 
         debug!(address = ?ucp_get_default, "ucp_get via RTLD_DEFAULT");
         debug!(address = ?ucp_get_next, "ucp_get via RTLD_NEXT");
@@ -521,45 +739,17 @@ fn print_library_debug_info() {
 }
 
 // helper function to decide fault injection using local state
-fn should_inject_fault() -> bool {
+fn should_inject_fault() -> Option<UcsStatus> {
     let enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed);
-    let probability = LOCAL_STATE.probability.load(Ordering::Relaxed);
 
-    if !enabled || probability == 0 {
-        return false;
+    if !enabled {
+        return None;
     }
 
-    // simple random check
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
-    let random = (hasher.finish() % 100) as u32;
-
-    random < probability
+    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+    strategy.should_inject()
 }
 
-// helper function to decide fault injection using pre-read state
-fn should_inject_fault_with_state(state: (bool, u32, u32)) -> bool {
-    let (enabled, _scenario, probability) = state;
-
-    if !enabled || probability == 0 {
-        return false;
-    }
-
-    // simple random check
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
-    let random = (hasher.finish() % 100) as u32;
-
-    random < probability
-}
 
 // UCX function interceptors - focused on ucp_get_nbx for remote reads
 #[no_mangle]
@@ -592,52 +782,28 @@ pub extern "C" fn ucp_get_nbx(
     static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    // Read current state once for both logging and fault injection
-    let current_state = (
-        LOCAL_STATE.enabled.load(Ordering::Relaxed),
-        LOCAL_STATE.scenario.load(Ordering::Relaxed),
-        LOCAL_STATE.probability.load(Ordering::Relaxed),
-    );
-
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
         info!(
             "ucp_get_nbx called #{} - ep: {:?}, buffer: {:?}, count: {}, remote_addr: 0x{:x}, rkey: {:?}, param: {:?}",
             call_num, ep, buffer, count, remote_addr, rkey, param
         );
+
+        let state = get_current_state();
         info!(
-            "Fault state: enabled={}, scenario={}, probability={}%",
-            current_state.0, current_state.1, current_state.2
+            "Fault state: enabled={}, strategy={}, pattern={:?}, error_codes={:?}",
+            state.enabled, state.strategy, state.pattern, state.error_codes
         );
     }
 
-    if should_inject_fault_with_state(current_state) {
-        let scenario = current_state.1;
-        let fault_result = match scenario {
-            0 => {
-                warn!(error_code = UCS_ERR_IO_ERROR, "[FAULT] INJECTED: ucp_get_nbx network/IO error (UCS_ERR_IO_ERROR = {})", UCS_ERR_IO_ERROR);
-                ucs_status_to_ptr(UCS_ERR_IO_ERROR)
-            }
-            1 => {
-                warn!(error_code = UCS_ERR_UNREACHABLE, "[FAULT] INJECTED: ucp_get_nbx unreachable error (UCS_ERR_UNREACHABLE = {})", UCS_ERR_UNREACHABLE);
-                ucs_status_to_ptr(UCS_ERR_UNREACHABLE)
-            }
-            2 => {
-                warn!(error_code = UCS_ERR_TIMED_OUT, "[FAULT] INJECTED: ucp_get_nbx timeout error (UCS_ERR_TIMED_OUT = {})", UCS_ERR_TIMED_OUT);
-                ucs_status_to_ptr(UCS_ERR_TIMED_OUT)
-            }
-            _ => {
-                // This case shouldn't happen, continue with normal execution
-                std::ptr::null_mut()
-            }
-        };
+    if let Some(error_code) = should_inject_fault() {
+        warn!(error_code = error_code, "[FAULT] INJECTED: ucp_get_nbx error ({})", error_code);
+        let fault_result = ucs_status_to_ptr(error_code);
 
-        if scenario <= 2 {
-            // Clear reentrancy guard before returning fault result
-            IN_INTERCEPT.with(|flag| {
-                *flag.borrow_mut() = false;
-            });
-            return fault_result;
-        }
+        // Clear reentrancy guard before returning fault result
+        IN_INTERCEPT.with(|flag| {
+            *flag.borrow_mut() = false;
+        });
+        return fault_result;
     }
 
     // Get the real function pointer atomically - with lazy initialization
@@ -675,4 +841,155 @@ pub extern "C" fn ucp_get_nbx(
     });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    // Mock UCX types for testing
+    fn create_mock_ep() -> UcpEpH {
+        0x1234 as *mut c_void
+    }
+
+    fn create_mock_rkey() -> UcpRkeyH {
+        0x5678 as *mut c_void
+    }
+
+    fn create_mock_param() -> UcpRequestParamT {
+        std::ptr::null()
+    }
+
+    #[test]
+    fn test_fault_strategy_random() {
+        let mut strategy = FaultStrategy::new_random(100); // 100% probability
+        assert!(strategy.should_inject().is_some());
+
+        let mut strategy = FaultStrategy::new_random(0); // 0% probability
+        assert!(strategy.should_inject().is_none());
+    }
+
+    #[test]
+    fn test_fault_strategy_pattern() {
+        let mut strategy = FaultStrategy::new_pattern("XOX".to_string());
+
+        assert!(strategy.should_inject().is_some());  // X
+        assert!(strategy.should_inject().is_none()); // O
+        assert!(strategy.should_inject().is_some());  // X
+        assert!(strategy.should_inject().is_some());  // X (wraps around)
+    }
+
+    #[test]
+    fn test_command_handling() {
+        // Test toggle command
+        let cmd = Command {
+            command: "toggle".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            error_codes: None,
+        };
+
+        let response = handle_command(cmd);
+        assert_eq!(response.status, "ok");
+        assert!(response.state.is_some());
+
+    }
+
+    #[test]
+    fn test_ucp_get_nbx_mock() {
+        // Reset state
+        LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
+
+        let ep = create_mock_ep();
+        let buffer = std::ptr::null_mut();
+        let count = 1024;
+        let remote_addr = 0x1000;
+        let rkey = create_mock_rkey();
+        let param = create_mock_param();
+
+        // Test with fault injection disabled - should not inject faults
+        let result = ucp_get_nbx(ep, buffer, count, remote_addr, rkey, param);
+        // With no real UCX, this will return an error (IO_ERROR)
+        assert_eq!(result as isize, UCS_ERR_IO_ERROR as isize);
+
+        // Enable fault injection
+        LOCAL_STATE.enabled.store(true, Ordering::Relaxed);
+
+        // Force fault injection with 100% probability and specific error code
+        {
+            let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+            *strategy = FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_UNREACHABLE]);
+        }
+
+        let result = ucp_get_nbx(ep, buffer, count, remote_addr, rkey, param);
+        assert_eq!(result as isize, UCS_ERR_UNREACHABLE as isize);
+    }
+
+    #[test]
+    fn test_status_to_ptr_conversion() {
+        let ptr = ucs_status_to_ptr(UCS_ERR_IO_ERROR);
+        assert_eq!(ptr as isize, UCS_ERR_IO_ERROR as isize);
+
+        let ptr = ucs_status_to_ptr(UCS_ERR_TIMED_OUT);
+        assert_eq!(ptr as isize, UCS_ERR_TIMED_OUT as isize);
+    }
+
+    #[test]
+    fn test_get_current_state() {
+        // Set a known state
+        LOCAL_STATE.enabled.store(true, Ordering::Relaxed);
+
+        {
+            let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+            *strategy = FaultStrategy::new_random(75);
+        }
+
+        let state = get_current_state();
+        assert!(state.enabled);
+        assert_eq!(state.probability, 75);
+        assert_eq!(state.strategy, "random");
+        assert!(!state.error_codes.is_empty());
+    }
+
+    #[test]
+    fn test_error_code_pools() {
+        // Test random strategy with custom error codes
+        let mut strategy = FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_NO_MEMORY, UCS_ERR_BUSY]);
+        for _ in 0..10 {
+            if let Some(error_code) = strategy.should_inject() {
+                assert!(error_code == UCS_ERR_NO_MEMORY || error_code == UCS_ERR_BUSY);
+            }
+        }
+
+        // Test pattern strategy with custom error codes
+        let mut strategy = FaultStrategy::new_pattern_with_codes("XOX".to_string(), vec![UCS_ERR_CANCELED, UCS_ERR_REJECTED]);
+        assert_eq!(strategy.should_inject(), Some(UCS_ERR_CANCELED)); // X
+        assert_eq!(strategy.should_inject(), None); // O
+        assert_eq!(strategy.should_inject(), Some(UCS_ERR_REJECTED)); // X
+        assert_eq!(strategy.should_inject(), Some(UCS_ERR_CANCELED)); // X (wraps around)
+
+        // Test set_error_codes
+        strategy.set_error_codes(vec![UCS_ERR_TIMED_OUT]);
+        assert_eq!(strategy.should_inject(), None); // O
+        assert_eq!(strategy.should_inject(), Some(UCS_ERR_TIMED_OUT)); // X
+    }
+
+    #[test]
+    fn test_set_error_codes_command() {
+        let cmd = Command {
+            command: "set_error_codes".to_string(),
+            scenario: None,
+            value: None,
+            pattern: None,
+            error_codes: Some(vec![-4, -15]), // UCS_ERR_NO_MEMORY, UCS_ERR_BUSY
+        };
+
+        let response = handle_command(cmd);
+        assert_eq!(response.status, "ok");
+        if let Some(state) = response.state {
+            assert_eq!(state.error_codes, vec![-4, -15]);
+        }
+    }
 }

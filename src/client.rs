@@ -8,6 +8,8 @@ struct Command {
     scenario: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
 }
 
 
@@ -19,6 +21,9 @@ fn print_usage() {
     println!("  toggle                 Toggle fault injection on/off");
     println!("  scenario <0|1|2>       Set fault scenario (0=network, 1=timeout, 2=memory)");
     println!("  probability <0-100>    Set fault injection probability");
+    println!("  strategy <PATTERN>     Set fault strategy:");
+    println!("                           'random' - use probability-based randomization");
+    println!("                           'XOOOOXOO...' - pattern where X=fault, O=pass");
     println!("  reset                  Reset to default settings");
     println!("  status                 Show current state (broadcasts only)");
     println!();
@@ -26,6 +31,8 @@ fn print_usage() {
     println!("  ucx-fault-client toggle");
     println!("  ucx-fault-client scenario 1");
     println!("  ucx-fault-client probability 25");
+    println!("  ucx-fault-client strategy random");
+    println!("  ucx-fault-client strategy XOOOOOOXOOOOO");
     println!("  ucx-fault-client reset");
 }
 
@@ -88,6 +95,7 @@ fn main() {
             command: "toggle".to_string(),
             scenario: None,
             value: None,
+            pattern: None,
         },
         "scenario" => {
             if command_args.len() < 2 {
@@ -102,6 +110,7 @@ fn main() {
                 command: "set_scenario".to_string(),
                 scenario: Some(scenario_value),
                 value: None,
+                pattern: None,
             }
         },
         "probability" => {
@@ -117,17 +126,34 @@ fn main() {
                 command: "set_probability".to_string(),
                 scenario: None,
                 value: Some(prob_value),
+                pattern: None,
+            }
+        },
+        "strategy" => {
+            if command_args.len() < 2 {
+                eprintln!("Error: strategy command requires a pattern");
+                eprintln!("  Use 'random' for probability-based faults");
+                eprintln!("  Use pattern like 'XOOOOXOO' where X=fault, O=pass");
+                std::process::exit(1);
+            }
+            Command {
+                command: "set_strategy".to_string(),
+                scenario: None,
+                value: None,
+                pattern: Some(command_args[1].clone()),
             }
         },
         "reset" => Command {
             command: "reset".to_string(),
             scenario: None,
             value: None,
+            pattern: None,
         },
         "status" => Command {
             command: "status".to_string(),
             scenario: None,
             value: None,
+            pattern: None,
         },
         _ => {
             eprintln!("Error: Unknown command '{}'", command_args[0]);
