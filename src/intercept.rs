@@ -107,40 +107,197 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
     }
 }
 
-// macro to generate symbol lookup functions for other UCX functions
-macro_rules! generate_symbol_finder {
-    ($fn_name:ident, $symbol_str:literal, $our_function:expr) => {
-        pub fn $fn_name() -> *mut c_void {
-            use std::ffi::CString;
+pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
+    use std::ffi::CString;
 
-            debug!(pid = std::process::id(), concat!("attempting to find real ", $symbol_str, " function"));
+    debug!(pid = std::process::id(), "attempting to find real ucp_put_nbx function");
 
-            unsafe {
-                let symbol_name = CString::new($symbol_str).unwrap();
-                let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
+    // Try multiple approaches to find the real UCX function
+    unsafe {
+        let symbol_name = CString::new("ucp_put_nbx").unwrap();
 
-                let our_function_addr = $our_function as *const () as *mut c_void;
-                if ptr == our_function_addr {
-                    ptr = std::ptr::null_mut();
-                }
+        // First try RTLD_NEXT - this should work for library interposition
+        info!(pid = std::process::id(), "looking up symbol with RTLD_NEXT: ucp_put_nbx");
+        let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
 
-                if ptr.is_null() {
-                    ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-                    if ptr == our_function_addr {
-                        ptr = std::ptr::null_mut();
-                    }
-                }
+        // Check if we got our own function (infinite recursion trap)
+        let our_function_addr = ucp_put_nbx as *const () as *mut c_void;
+        info!(pid = std::process::id(), "Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr);
+        if ptr == our_function_addr {
+            info!(pid = std::process::id(), "RTLD_NEXT returned our own function, skipping");
+            ptr = std::ptr::null_mut();
+        }
 
-                debug!(pid = std::process::id(), address = ?ptr, symbol_found = !ptr.is_null(), concat!($symbol_str, " symbol lookup completed"));
-                ptr
+        if ptr.is_null() {
+            info!(pid = std::process::id(), "RTLD_NEXT failed, trying RTLD_DEFAULT");
+            ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+            info!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
+
+            // Check again for our own function
+            if ptr == our_function_addr {
+                info!(pid = std::process::id(), "RTLD_DEFAULT returned our own function, skipping");
+                ptr = std::ptr::null_mut();
             }
         }
-    };
+
+        if ptr.is_null() {
+            info!(pid = std::process::id(), "RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
+
+            // First, try to find where UCX is already loaded by reading memory maps
+            #[cfg(target_os = "linux")]
+            let ucx_lib_paths = {
+                let mut paths = Vec::new();
+                if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+                    for line in maps.lines() {
+                        if line.contains("libucp") {
+                            // Extract the library path from the maps line
+                            if let Some(path_start) = line.rfind(' ') {
+                                let path = &line[path_start + 1..];
+                                if path.starts_with('/') && !paths.contains(&path.to_string()) {
+                                    paths.push(path.to_string());
+                                    info!(pid = std::process::id(), "Found UCX library in memory map: {}", path);
+                                }
+                            }
+                        }
+                    }
+                }
+                paths
+            };
+
+            #[cfg(not(target_os = "linux"))]
+            let ucx_lib_paths: Vec<String> = Vec::new();
+
+            // Try to dlopen each found UCX library and look for the symbol
+            for lib_path in ucx_lib_paths {
+                let lib_path_cstr = CString::new(lib_path.as_str()).unwrap();
+                let handle = libc::dlopen(lib_path_cstr.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+                if !handle.is_null() {
+                    ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                    if !ptr.is_null() && ptr != our_function_addr {
+                        info!(pid = std::process::id(), "Found ucp_put_nbx in {}: {:?}", lib_path, ptr);
+                        break;
+                    }
+                    // Note: don't call dlclose since RTLD_NOLOAD just gets a reference
+                }
+            }
+        }
+
+        if ptr.is_null() {
+            // Final attempt - try some common UCX library names
+            let common_ucx_libs = ["libucp.so.0", "libucp.so", "libucp.dylib"];
+            for lib_name in &common_ucx_libs {
+                let lib_name_cstr = CString::new(*lib_name).unwrap();
+                let handle = libc::dlopen(lib_name_cstr.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+                if !handle.is_null() {
+                    ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                    if !ptr.is_null() && ptr != our_function_addr {
+                        info!(pid = std::process::id(), "Found ucp_put_nbx in {}: {:?}", lib_name, ptr);
+                        break;
+                    }
+                }
+            }
+        }
+
+        debug!(pid = std::process::id(), address = ?ptr, symbol_found = !ptr.is_null(), "ucp_put_nbx symbol lookup completed");
+        ptr
+    }
 }
 
-// generate symbol finder functions using the macro for other functions
-generate_symbol_finder!(try_find_real_ucp_put_nbx, "ucp_put_nbx", ucp_put_nbx);
-generate_symbol_finder!(try_find_real_ucp_ep_flush_nbx, "ucp_ep_flush_nbx", ucp_ep_flush_nbx);
+pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
+    use std::ffi::CString;
+
+    debug!(pid = std::process::id(), "attempting to find real ucp_ep_flush_nbx function");
+
+    // Try multiple approaches to find the real UCX function
+    unsafe {
+        let symbol_name = CString::new("ucp_ep_flush_nbx").unwrap();
+
+        // First try RTLD_NEXT - this should work for library interposition
+        info!(pid = std::process::id(), "looking up symbol with RTLD_NEXT: ucp_ep_flush_nbx");
+        let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol_name.as_ptr());
+
+        // Check if we got our own function (infinite recursion trap)
+        let our_function_addr = ucp_ep_flush_nbx as *const () as *mut c_void;
+        info!(pid = std::process::id(), "Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr);
+        if ptr == our_function_addr {
+            info!(pid = std::process::id(), "RTLD_NEXT returned our own function, skipping");
+            ptr = std::ptr::null_mut();
+        }
+
+        if ptr.is_null() {
+            info!(pid = std::process::id(), "RTLD_NEXT failed, trying RTLD_DEFAULT");
+            ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
+            info!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
+
+            // Check again for our own function
+            if ptr == our_function_addr {
+                info!(pid = std::process::id(), "RTLD_DEFAULT returned our own function, skipping");
+                ptr = std::ptr::null_mut();
+            }
+        }
+
+        if ptr.is_null() {
+            info!(pid = std::process::id(), "RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules");
+
+            // First, try to find where UCX is already loaded by reading memory maps
+            #[cfg(target_os = "linux")]
+            let ucx_lib_paths = {
+                let mut paths = Vec::new();
+                if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+                    for line in maps.lines() {
+                        if line.contains("libucp") {
+                            // Extract the library path from the maps line
+                            if let Some(path_start) = line.rfind(' ') {
+                                let path = &line[path_start + 1..];
+                                if path.starts_with('/') && !paths.contains(&path.to_string()) {
+                                    paths.push(path.to_string());
+                                    info!(pid = std::process::id(), "Found UCX library in memory map: {}", path);
+                                }
+                            }
+                        }
+                    }
+                }
+                paths
+            };
+
+            #[cfg(not(target_os = "linux"))]
+            let ucx_lib_paths: Vec<String> = Vec::new();
+
+            // Try to dlopen each found UCX library and look for the symbol
+            for lib_path in ucx_lib_paths {
+                let lib_path_cstr = CString::new(lib_path.as_str()).unwrap();
+                let handle = libc::dlopen(lib_path_cstr.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+                if !handle.is_null() {
+                    ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                    if !ptr.is_null() && ptr != our_function_addr {
+                        info!(pid = std::process::id(), "Found ucp_ep_flush_nbx in {}: {:?}", lib_path, ptr);
+                        break;
+                    }
+                    // Note: don't call dlclose since RTLD_NOLOAD just gets a reference
+                }
+            }
+        }
+
+        if ptr.is_null() {
+            // Final attempt - try some common UCX library names
+            let common_ucx_libs = ["libucp.so.0", "libucp.so", "libucp.dylib"];
+            for lib_name in &common_ucx_libs {
+                let lib_name_cstr = CString::new(*lib_name).unwrap();
+                let handle = libc::dlopen(lib_name_cstr.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+                if !handle.is_null() {
+                    ptr = libc::dlsym(handle, symbol_name.as_ptr());
+                    if !ptr.is_null() && ptr != our_function_addr {
+                        info!(pid = std::process::id(), "Found ucp_ep_flush_nbx in {}: {:?}", lib_name, ptr);
+                        break;
+                    }
+                }
+            }
+        }
+
+        debug!(pid = std::process::id(), address = ?ptr, symbol_found = !ptr.is_null(), "ucp_ep_flush_nbx symbol lookup completed");
+        ptr
+    }
+}
 
 // macro to generate init functions for real UCX function pointers
 macro_rules! generate_init_function {
