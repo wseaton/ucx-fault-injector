@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use tracing::{error, info, warn};
 
-use crate::commands::{Command, Response, State};
+use crate::commands::{Command, Response, State, HookConfig};
 use crate::state::LOCAL_STATE;
 use crate::strategy::FaultStrategy;
 use crate::recorder::SerializableCallRecord;
@@ -17,6 +17,13 @@ pub fn get_current_state() -> State {
     let total_calls = LOCAL_STATE.call_recorder.get_total_records();
     let pattern_length = LOCAL_STATE.call_recorder.generate_pattern().len();
 
+    let hook_config = LOCAL_STATE.hook_config.lock().unwrap();
+    let hook_config_state = HookConfig {
+        ucp_get_nbx_enabled: hook_config.ucp_get_nbx_enabled,
+        ucp_put_nbx_enabled: hook_config.ucp_put_nbx_enabled,
+        ucp_ep_flush_nbx_enabled: hook_config.ucp_ep_flush_nbx_enabled,
+    };
+
     State {
         enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
         probability: strategy.get_probability().unwrap_or(0),
@@ -26,6 +33,7 @@ pub fn get_current_state() -> State {
         recording_enabled,
         total_recorded_calls: total_calls,
         recorded_pattern_length: pattern_length,
+        hook_config: hook_config_state,
     }
 }
 
@@ -361,6 +369,100 @@ pub fn handle_command(cmd: Command) -> Response {
                 Response {
                     status: "error".to_string(),
                     message: "Missing pattern parameter".to_string(),
+                    state: None,
+                    recording_data: None,
+                }
+            }
+        }
+        "enable_hook" => {
+            if let Some(hook_name) = cmd.hook_name {
+                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
+                let result = match hook_name.as_str() {
+                    "ucp_get_nbx" => {
+                        hook_config.ucp_get_nbx_enabled = true;
+                        "ucp_get_nbx hook enabled"
+                    }
+                    "ucp_put_nbx" => {
+                        hook_config.ucp_put_nbx_enabled = true;
+                        "ucp_put_nbx hook enabled"
+                    }
+                    "ucp_ep_flush_nbx" => {
+                        hook_config.ucp_ep_flush_nbx_enabled = true;
+                        "ucp_ep_flush_nbx hook enabled"
+                    }
+                    "all" => {
+                        hook_config.ucp_get_nbx_enabled = true;
+                        hook_config.ucp_put_nbx_enabled = true;
+                        hook_config.ucp_ep_flush_nbx_enabled = true;
+                        "all hooks enabled"
+                    }
+                    _ => {
+                        return Response {
+                            status: "error".to_string(),
+                            message: format!("Unknown hook name: {}. Valid options: ucp_get_nbx, ucp_put_nbx, ucp_ep_flush_nbx, all", hook_name),
+                            state: None,
+                            recording_data: None,
+                        };
+                    }
+                };
+                info!(hook_name = hook_name, "hook enabled");
+                Response {
+                    status: "ok".to_string(),
+                    message: result.to_string(),
+                    state: Some(get_current_state()),
+                    recording_data: None,
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing hook_name parameter".to_string(),
+                    state: None,
+                    recording_data: None,
+                }
+            }
+        }
+        "disable_hook" => {
+            if let Some(hook_name) = cmd.hook_name {
+                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
+                let result = match hook_name.as_str() {
+                    "ucp_get_nbx" => {
+                        hook_config.ucp_get_nbx_enabled = false;
+                        "ucp_get_nbx hook disabled"
+                    }
+                    "ucp_put_nbx" => {
+                        hook_config.ucp_put_nbx_enabled = false;
+                        "ucp_put_nbx hook disabled"
+                    }
+                    "ucp_ep_flush_nbx" => {
+                        hook_config.ucp_ep_flush_nbx_enabled = false;
+                        "ucp_ep_flush_nbx hook disabled"
+                    }
+                    "all" => {
+                        hook_config.ucp_get_nbx_enabled = false;
+                        hook_config.ucp_put_nbx_enabled = false;
+                        hook_config.ucp_ep_flush_nbx_enabled = false;
+                        "all hooks disabled"
+                    }
+                    _ => {
+                        return Response {
+                            status: "error".to_string(),
+                            message: format!("Unknown hook name: {}. Valid options: ucp_get_nbx, ucp_put_nbx, ucp_ep_flush_nbx, all", hook_name),
+                            state: None,
+                            recording_data: None,
+                        };
+                    }
+                };
+                info!(hook_name = hook_name, "hook disabled");
+                Response {
+                    status: "ok".to_string(),
+                    message: result.to_string(),
+                    state: Some(get_current_state()),
+                    recording_data: None,
+                }
+            } else {
+                Response {
+                    status: "error".to_string(),
+                    message: "Missing hook_name parameter".to_string(),
                     state: None,
                     recording_data: None,
                 }

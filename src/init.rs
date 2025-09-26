@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
 use crate::subscriber::{get_current_state, start_file_watcher};
-use crate::intercept::init_real_ucp_get_nbx;
+use crate::intercept::{init_real_ucp_get_nbx, init_real_ucp_put_nbx, init_real_ucp_ep_flush_nbx};
 
 // initialize tracing subscriber
 pub fn init_tracing() {
@@ -123,8 +123,10 @@ pub fn init_fault_injector() {
         }
 
         // Force initialization of real functions to check symbol loading
-        debug!("initializing real UCX function pointer");
+        debug!("initializing real UCX function pointers");
         init_real_ucp_get_nbx();
+        init_real_ucp_put_nbx();
+        init_real_ucp_ep_flush_nbx();
 
         // Print detailed debug info if debug mode is enabled
         if DEBUG_ENABLED.load(Ordering::Relaxed) {

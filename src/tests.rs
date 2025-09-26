@@ -35,6 +35,9 @@ mod tests {
             value: None,
             pattern: None,
             error_codes: None,
+            recording_enabled: None,
+            export_format: None,
+            hook_name: None,
         };
 
         let response = handle_command(cmd);
@@ -44,11 +47,11 @@ mod tests {
 
     #[test]
     fn test_ucp_get_nbx_mock() {
+        // Reset state first to ensure clean test
+        LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
+
         // Test fault injection logic without calling the actual intercept function
         // to avoid expensive library search during testing
-
-        // Reset state
-        LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
 
         // Test with fault injection disabled
         assert!(crate::intercept::should_inject_fault().is_none());
@@ -63,7 +66,7 @@ mod tests {
         }
 
         // Test fault injection logic
-        assert_eq!(crate::intercept::should_inject_fault(), Some(UCS_ERR_UNREACHABLE));
+        assert_eq!(crate::intercept::should_inject_fault_for_function("ucp_get_nbx"), Some(UCS_ERR_UNREACHABLE));
     }
 
     #[test]
@@ -77,6 +80,9 @@ mod tests {
 
     #[test]
     fn test_get_current_state() {
+        // Reset state first to ensure clean test
+        LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
+
         // Set a known state
         LOCAL_STATE.enabled.store(true, Ordering::Relaxed);
 
@@ -117,11 +123,20 @@ mod tests {
 
     #[test]
     fn test_set_error_codes_command() {
+        // Reset strategy to ensure clean test state
+        {
+            let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+            *strategy = FaultStrategy::new_random(50); // Reset to default state
+        }
+
         let cmd = Command {
             command: "set_error_codes".to_string(),
             value: None,
-            pattern: None,
-            error_codes: Some(vec![-4, -15]), // UCS_ERR_NO_MEMORY, UCS_ERR_BUSY
+            pattern: Some("-4,-15".to_string()), // UCS_ERR_NO_MEMORY, UCS_ERR_BUSY as comma-separated string
+            error_codes: None,
+            recording_enabled: None,
+            export_format: None,
+            hook_name: None,
         };
 
         let response = handle_command(cmd);

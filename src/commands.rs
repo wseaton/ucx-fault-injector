@@ -9,6 +9,7 @@ pub struct Command {
     pub error_codes: Option<Vec<i32>>,
     pub recording_enabled: Option<bool>,
     pub export_format: Option<String>,
+    pub hook_name: Option<String>, // for hook-specific enable/disable
 }
 
 #[derive(Serialize, Debug)]
@@ -29,4 +30,12 @@ pub struct State {
     pub recording_enabled: bool,
     pub total_recorded_calls: u64,
     pub recorded_pattern_length: usize,
+    pub hook_config: HookConfig,
+}
+
+#[derive(Serialize, Debug)]
+pub struct HookConfig {
+    pub ucp_get_nbx_enabled: bool,
+    pub ucp_put_nbx_enabled: bool,
+    pub ucp_ep_flush_nbx_enabled: bool,
 }

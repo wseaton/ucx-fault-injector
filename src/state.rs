@@ -6,10 +6,29 @@ use tracing::info;
 use crate::strategy::FaultStrategy;
 use crate::recorder::CallRecordBuffer;
 
+// configuration for which UCX function hooks are enabled
+#[derive(Debug, Clone)]
+pub struct HookConfiguration {
+    pub ucp_get_nbx_enabled: bool,
+    pub ucp_put_nbx_enabled: bool,
+    pub ucp_ep_flush_nbx_enabled: bool,
+}
+
+impl Default for HookConfiguration {
+    fn default() -> Self {
+        Self {
+            ucp_get_nbx_enabled: true,   // reads enabled by default
+            ucp_put_nbx_enabled: true,   // writes enabled by default
+            ucp_ep_flush_nbx_enabled: true, // flush enabled by default
+        }
+    }
+}
+
 // Local process state structure (no shared memory)
 pub struct LocalFaultState {
     pub enabled: AtomicBool,
     pub strategy: Mutex<FaultStrategy>,
+    pub hook_config: Mutex<HookConfiguration>,
 
     // Call recording and statistics (local only)
     pub call_recorder: CallRecordBuffer,
@@ -18,6 +37,10 @@ pub struct LocalFaultState {
     pub calls_since_fault: AtomicU64,
     pub ucp_get_nbx_calls: AtomicU64,
     pub ucp_get_nbx_faults: AtomicU64,
+    pub ucp_put_nbx_calls: AtomicU64,
+    pub ucp_put_nbx_faults: AtomicU64,
+    pub ucp_ep_flush_nbx_calls: AtomicU64,
+    pub ucp_ep_flush_nbx_faults: AtomicU64,
 }
 
 impl LocalFaultState {
@@ -25,12 +48,17 @@ impl LocalFaultState {
         Self {
             enabled: AtomicBool::new(false),
             strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
+            hook_config: Mutex::new(HookConfiguration::default()),
             call_recorder: CallRecordBuffer::new(),
             total_calls: AtomicU64::new(0),
             faults_injected: AtomicU64::new(0),
             calls_since_fault: AtomicU64::new(0),
             ucp_get_nbx_calls: AtomicU64::new(0),
             ucp_get_nbx_faults: AtomicU64::new(0),
+            ucp_put_nbx_calls: AtomicU64::new(0),
+            ucp_put_nbx_faults: AtomicU64::new(0),
+            ucp_ep_flush_nbx_calls: AtomicU64::new(0),
+            ucp_ep_flush_nbx_faults: AtomicU64::new(0),
         }
     }
 }
