@@ -2,7 +2,34 @@
 
 Dynamic fault injection for UCX applications via real-time file-based IPC.
 
-## Build
+## Installation
+
+### Pre-built Binaries
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/wseaton/ucx-fault-injector/releases):
+
+```bash
+# Linux (x86_64)
+curl -LO https://github.com/wseaton/ucx-fault-injector/releases/latest/download/ucx-fault-injector-linux-amd64.tar.gz
+tar xzf ucx-fault-injector-linux-amd64.tar.gz
+cd ucx-fault-injector-linux-amd64
+
+# macOS (Apple Silicon)
+curl -LO https://github.com/wseaton/ucx-fault-injector/releases/latest/download/ucx-fault-injector-darwin-arm64.tar.gz
+tar xzf ucx-fault-injector-darwin-arm64.tar.gz
+cd ucx-fault-injector-darwin-arm64
+
+# macOS (Intel)
+curl -LO https://github.com/wseaton/ucx-fault-injector/releases/latest/download/ucx-fault-injector-darwin-amd64.tar.gz
+tar xzf ucx-fault-injector-darwin-amd64.tar.gz
+cd ucx-fault-injector-darwin-amd64
+```
+
+Each tarball contains:
+- `ucx-fault-client` - CLI tool for controlling fault injection
+- `libucx_fault_injector.so` (or `.dylib` on macOS) - Shared library for LD_PRELOAD
+
+### Building from Source
 
 ```bash
 cargo build --release
@@ -12,25 +39,29 @@ cargo build --release
 
 **Start your UCX app with fault injection:**
 ```bash
+# If using pre-built binaries
+LD_PRELOAD=./libucx_fault_injector.so your_app
+
+# If built from source
 LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 ```
 
 **Control faults in real-time:**
 ```bash
 # Fault injection commands
-./target/release/ucx-fault-client status                # Check status
-./target/release/ucx-fault-client toggle                # Enable/disable
-./target/release/ucx-fault-client probability 50        # Set 50% fault rate (random selection)
-./target/release/ucx-fault-client error-codes -- -3,-6,-20 # Set custom error codes
-./target/release/ucx-fault-client pattern XOOOOXOO      # Set deterministic fault pattern
-./target/release/ucx-fault-client reset                 # Reset defaults
+./ucx-fault-client status                # Check status
+./ucx-fault-client toggle                # Enable/disable
+./ucx-fault-client probability 50        # Set 50% fault rate (random selection)
+./ucx-fault-client error-codes -- -3,-6,-20 # Set custom error codes
+./ucx-fault-client pattern XOOOOXOO      # Set deterministic fault pattern
+./ucx-fault-client reset                 # Reset defaults
 
 # Recording & replay commands
-./target/release/ucx-fault-client record-toggle on      # Enable call recording
-./target/release/ucx-fault-client record-dump summary   # Show recording statistics
-./target/release/ucx-fault-client record-dump pattern   # Export fault pattern
-./target/release/ucx-fault-client replay                # Replay recorded pattern
-./target/release/ucx-fault-client record-clear          # Clear recorded data
+./ucx-fault-client record-toggle on      # Enable call recording
+./ucx-fault-client record-dump summary   # Show recording statistics
+./ucx-fault-client record-dump pattern   # Export fault pattern
+./ucx-fault-client replay                # Replay recorded pattern
+./ucx-fault-client record-clear          # Clear recorded data
 ```
 
 ## Example: Testing NIXL
@@ -42,12 +73,12 @@ uv pip install nixl
 curl -o nixl_example.py https://raw.githubusercontent.com/ai-dynamo/nixl/refs/tags/0.6.0/examples/python/nixl_api_example.py
 
 # Run with fault injection
-LD_PRELOAD=./target/release/libucx_fault_injector.so python nixl_example.py &
+LD_PRELOAD=./libucx_fault_injector.so python nixl_example.py &
 
 # Inject faults
-./target/release/ucx-fault-client toggle
-./target/release/ucx-fault-client pattern XOOOOXOO     # Fault every 1st and 6th call
-./target/release/ucx-fault-client error-codes -- -3,-6    # Use IO_ERROR and UNREACHABLE
+./ucx-fault-client toggle
+./ucx-fault-client pattern XOOOOXOO     # Fault every 1st and 6th call
+./ucx-fault-client error-codes -- -3,-6    # Use IO_ERROR and UNREACHABLE
 ```
 
 **Result:**
@@ -62,16 +93,16 @@ The fault injector uses a simple error code system with two selection methods:
 
 ### Random Selection (Probability-based)
 ```bash
-./target/release/ucx-fault-client probability 25        # 25% chance per call
-./target/release/ucx-fault-client error-codes -- -3,-6,-20 # Custom error codes to select from
+./ucx-fault-client probability 25        # 25% chance per call
+./ucx-fault-client error-codes -- -3,-6,-20 # Custom error codes to select from
 ```
 - When a fault is triggered, randomly selects from the configured error codes
 - Default error codes: -3 (IO_ERROR), -6 (UNREACHABLE), -20 (TIMED_OUT)
 
 ### Pattern-based Selection (Deterministic)
 ```bash
-./target/release/ucx-fault-client pattern XOOOOXOO      # X=fault, O=pass
-./target/release/ucx-fault-client error-codes -- -3,-6     # Error codes to cycle through
+./ucx-fault-client pattern XOOOOXOO      # X=fault, O=pass
+./ucx-fault-client error-codes -- -3,-6     # Error codes to cycle through
 ```
 - Pattern repeats cyclically through UCX calls
 - `X` positions inject faults, `O` positions pass through normally
@@ -91,15 +122,15 @@ By default, the system uses these error codes:
 **Via CLI:**
 ```bash
 # Set specific error codes to use for fault injection
-./target/release/ucx-fault-client error-codes -- -3,-6,-20,-25
+./ucx-fault-client error-codes -- -3,-6,-20,-25
 
 # Combined with probability (random selection)
-./target/release/ucx-fault-client probability 30
-./target/release/ucx-fault-client error-codes -- -4,-15
+./ucx-fault-client probability 30
+./ucx-fault-client error-codes -- -4,-15
 
 # Combined with pattern (deterministic cycling)
-./target/release/ucx-fault-client pattern XOXO
-./target/release/ucx-fault-client error-codes -- -3,-6
+./ucx-fault-client pattern XOXO
+./ucx-fault-client error-codes -- -3,-6
 ```
 
 **Advanced file-based configuration:**
@@ -123,30 +154,30 @@ The fault injector now supports recording UCX calls and their fault injection de
 
 **Enable/disable recording:**
 ```bash
-./target/release/ucx-fault-client record-toggle         # Toggle current state
-./target/release/ucx-fault-client record-toggle on      # Enable recording
-./target/release/ucx-fault-client record-toggle off     # Disable recording
+./ucx-fault-client record-toggle         # Toggle current state
+./ucx-fault-client record-toggle on      # Enable recording
+./ucx-fault-client record-toggle off     # Disable recording
 ```
 
 **Export recorded data:**
 ```bash
 # High-level statistics (default)
-./target/release/ucx-fault-client record-dump summary
+./ucx-fault-client record-dump summary
 
 # Fault pattern and error codes for replay
-./target/release/ucx-fault-client record-dump pattern
+./ucx-fault-client record-dump pattern
 
 # Detailed call records
-./target/release/ucx-fault-client record-dump records
+./ucx-fault-client record-dump records
 
 # Last N call records
-./target/release/ucx-fault-client record-dump-count 50
+./ucx-fault-client record-dump-count 50
 ```
 
 **Manage recordings:**
 ```bash
-./target/release/ucx-fault-client record-clear          # Clear buffer
-./target/release/ucx-fault-client replay                # Replay pattern
+./ucx-fault-client record-clear          # Clear buffer
+./ucx-fault-client replay                # Replay pattern
 ```
 
 ### Export Formats
@@ -198,28 +229,28 @@ The fault injector now supports recording UCX calls and their fault injection de
 **Record and replay a fault pattern:**
 ```bash
 # 1. Start recording
-./target/release/ucx-fault-client record-toggle on
+./ucx-fault-client record-toggle on
 
 # 2. Run your application with some fault injection
-./target/release/ucx-fault-client strategy random
-./target/release/ucx-fault-client probability 25
+./ucx-fault-client strategy random
+./ucx-fault-client probability 25
 # ... run your UCX application ...
 
 # 3. Export the pattern that was generated
-./target/release/ucx-fault-client record-dump pattern
+./ucx-fault-client record-dump pattern
 
 # 4. Replay the exact same pattern
-./target/release/ucx-fault-client replay
+./ucx-fault-client replay
 # ... run your UCX application again ...
 ```
 
 **Analyze call patterns:**
 ```bash
 # Get high-level statistics
-./target/release/ucx-fault-client record-dump summary
+./ucx-fault-client record-dump summary
 
 # Examine recent call details
-./target/release/ucx-fault-client record-dump-count 100
+./ucx-fault-client record-dump-count 100
 ```
 
 ### Available UCX Error Codes
