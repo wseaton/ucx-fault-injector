@@ -1,13 +1,24 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+fn validate_probability(s: &str) -> Result<f64, String> {
+    let value: f64 = s.parse()
+        .map_err(|_| format!("'{}' is not a valid number", s))?;
+
+    if value < 0.0 || value > 100.0 {
+        return Err(format!("probability must be between 0.0 and 100.0, got {}", value));
+    }
+
+    Ok(value)
+}
+
 #[derive(Serialize)]
 struct Command {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     scenario: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<u32>,
+    value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pattern: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,11 +40,11 @@ struct Cli {
 enum Commands {
     /// Toggle fault injection on/off
     Toggle,
-    /// Set fault injection probability (0-100)
+    /// Set fault injection probability (0.0-100.0)
     Probability {
-        /// Probability percentage (0-100)
-        #[arg(value_parser = clap::value_parser!(u32).range(0..=100))]
-        probability: u32,
+        /// Probability percentage (0.0-100.0)
+        #[arg(value_parser = validate_probability)]
+        probability: f64,
     },
     /// Set error codes for fault injection
     ErrorCodes {
@@ -203,7 +214,7 @@ fn main() {
         Commands::RecordDumpCount { count } => Command {
             command: "dump_recording".to_string(),
             scenario: None,
-            value: Some(count),
+            value: Some(count as f64),
             pattern: None,
             recording_enabled: None,
             export_format: Some("records".to_string()),

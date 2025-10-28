@@ -51,7 +51,7 @@ LD_PRELOAD=./target/release/libucx_fault_injector.so your_app
 # Fault injection commands
 ./ucx-fault-client status                # Check status
 ./ucx-fault-client toggle                # Enable/disable
-./ucx-fault-client probability 50        # Set 50% fault rate (random selection)
+./ucx-fault-client probability 0.5       # Set 0.5% fault rate (random selection)
 ./ucx-fault-client error-codes -- -3,-6,-20 # Set custom error codes
 ./ucx-fault-client pattern XOOOOXOO      # Set deterministic fault pattern
 ./ucx-fault-client reset                 # Reset defaults
@@ -93,7 +93,7 @@ The fault injector uses a simple error code system with two selection methods:
 
 ### Random Selection (Probability-based)
 ```bash
-./ucx-fault-client probability 25        # 25% chance per call
+./ucx-fault-client probability 2.5       # 2.5% chance per call
 ./ucx-fault-client error-codes -- -3,-6,-20 # Custom error codes to select from
 ```
 - When a fault is triggered, randomly selects from the configured error codes
@@ -125,7 +125,7 @@ By default, the system uses these error codes:
 ./ucx-fault-client error-codes -- -3,-6,-20,-25
 
 # Combined with probability (random selection)
-./ucx-fault-client probability 30
+./ucx-fault-client probability 1.5
 ./ucx-fault-client error-codes -- -4,-15
 
 # Combined with pattern (deterministic cycling)
@@ -233,7 +233,7 @@ The fault injector now supports recording UCX calls and their fault injection de
 
 # 2. Run your application with some fault injection
 ./ucx-fault-client strategy random
-./ucx-fault-client probability 25
+./ucx-fault-client probability 5.0
 # ... run your UCX application ...
 
 # 3. Export the pattern that was generated
