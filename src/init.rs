@@ -1,12 +1,29 @@
+use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::Ordering;
-use nix::fcntl::{Flock, FlockArg};
 use tracing::{debug, error, info, warn};
 
+use crate::intercept::{init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
-use crate::subscriber::{get_current_state, start_file_watcher};
-use crate::intercept::{init_real_ucp_get_nbx, init_real_ucp_put_nbx, init_real_ucp_ep_flush_nbx};
+use crate::subscriber::{get_current_state, start_file_watcher, start_socket_server};
+
+// IPC backend selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpcBackend {
+    Socket, // Unix domain socket (default)
+    File,   // File-based watching (legacy)
+}
+
+impl IpcBackend {
+    fn from_env() -> Self {
+        match std::env::var("UCX_FAULT_IPC_BACKEND").as_deref() {
+            Ok("file") => IpcBackend::File,
+            Ok("socket") => IpcBackend::Socket,
+            _ => IpcBackend::Socket, // default to socket
+        }
+    }
+}
 
 // initialize tracing subscriber
 pub fn init_tracing() {
@@ -44,7 +61,9 @@ pub fn is_already_initialized() -> bool {
                     // We got the lock, write our PID and keep the file open
                     use std::io::Write;
 
-                    if let Err(e) = writeln!(&*locked_file, "session_{}_pid_{}", session_id, current_pid) {
+                    if let Err(e) =
+                        writeln!(&*locked_file, "session_{}_pid_{}", session_id, current_pid)
+                    {
                         error!(error = %e, "failed to write session/PID to lock file");
                     }
 
@@ -112,13 +131,35 @@ pub fn init_fault_injector() {
         info!("UCX fault injector loaded (Rust version)");
         info!(pid = current_pid, "initialization starting");
 
-        // Clear old command file to prevent replay of stale commands
-        let command_file = "/tmp/ucx-fault-commands";
-        if std::path::Path::new(command_file).exists() {
-            if let Err(e) = std::fs::remove_file(command_file) {
-                warn!(command_file, error = %e, "failed to clear old command file");
-            } else {
-                info!(command_file, "cleared old command file to prevent stale command replay");
+        // Determine which IPC backend to use
+        let ipc_backend = IpcBackend::from_env();
+
+        // Clean up old IPC artifacts based on backend
+        match ipc_backend {
+            IpcBackend::Socket => {
+                // Remove stale socket for this PID
+                let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
+                if std::path::Path::new(&socket_path).exists() {
+                    if let Err(e) = std::fs::remove_file(&socket_path) {
+                        warn!(socket_path, error = %e, "failed to remove stale socket");
+                    } else {
+                        info!(socket_path, "removed stale socket file");
+                    }
+                }
+            }
+            IpcBackend::File => {
+                // Clear old command file to prevent replay of stale commands
+                let command_file = "/tmp/ucx-fault-commands";
+                if std::path::Path::new(command_file).exists() {
+                    if let Err(e) = std::fs::remove_file(command_file) {
+                        warn!(command_file, error = %e, "failed to clear old command file");
+                    } else {
+                        info!(
+                            command_file,
+                            "cleared old command file to prevent stale command replay"
+                        );
+                    }
+                }
             }
         }
 
@@ -140,7 +181,10 @@ pub fn init_fault_injector() {
 
         info!("UCX fault injector function interception initialization complete");
     } else {
-        info!(pid = current_pid, "UCX fault injector function interception already initialized, skipping function setup");
+        info!(
+            pid = current_pid,
+            "UCX fault injector function interception already initialized, skipping function setup"
+        );
     }
 
     // check for debug mode
@@ -151,7 +195,7 @@ pub fn init_fault_injector() {
 
     // shared state removed - using local state only for simplicity and reliability
 
-    // Always initialize local state for each process (needed for file watcher)
+    // Always initialize local state for each process (needed for IPC)
     let _ = &*LOCAL_STATE; // Force initialization
     let state = get_current_state();
     info!(
@@ -163,21 +207,48 @@ pub fn init_fault_injector() {
         "local process state initialized"
     );
 
-    // Always start file watcher for each process - this ensures commands reach all PIDs
-    info!("starting file watcher for commands");
-    start_file_watcher();
-    info!(command_file = "/tmp/ucx-fault-commands", "file watcher started");
+    // Start IPC backend based on environment variable
+    let ipc_backend = IpcBackend::from_env();
+    match ipc_backend {
+        IpcBackend::Socket => {
+            info!("starting Unix domain socket server for commands");
+            start_socket_server();
+            let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
+            info!(socket_path, backend = "socket", "IPC server started");
 
-    if !function_intercept_already_initialized {
-        info!("file-based commands:");
-        info!("  Use ucx-fault-client to send commands via file");
-        info!("  Examples: ./ucx-fault-client toggle");
-        info!("           ./ucx-fault-client probability 50");
-        info!("           ./ucx-fault-client record-dump");
-        info!("           ./ucx-fault-client status");
+            if !function_intercept_already_initialized {
+                info!("socket-based commands:");
+                info!("  Use ucx-fault-client to send commands via Unix domain sockets");
+                info!("  Examples: ./ucx-fault-client toggle");
+                info!("           ./ucx-fault-client probability 50");
+                info!("           ./ucx-fault-client record-dump");
+                info!("           ./ucx-fault-client status");
+            }
+        }
+        IpcBackend::File => {
+            info!("starting file watcher for commands");
+            start_file_watcher();
+            info!(
+                command_file = "/tmp/ucx-fault-commands",
+                backend = "file",
+                "IPC server started"
+            );
+
+            if !function_intercept_already_initialized {
+                info!("file-based commands:");
+                info!("  Use ucx-fault-client to send commands via file");
+                info!("  Examples: ./ucx-fault-client toggle");
+                info!("           ./ucx-fault-client probability 50");
+                info!("           ./ucx-fault-client record-dump");
+                info!("           ./ucx-fault-client status");
+            }
+        }
     }
 
-    info!(pid = current_pid, "UCX fault injector process initialization complete");
+    info!(
+        pid = current_pid,
+        "UCX fault injector process initialization complete"
+    );
     if !function_intercept_already_initialized {
         info!("to enable debug output, set UCX_FAULT_DEBUG=1 in environment");
     }
@@ -197,9 +268,10 @@ fn perform_cleanup() {
     static CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
     // Use atomic CAS to ensure only one cleanup happens, avoiding deadlock from signal + dtor
-    if CLEANUP_IN_PROGRESS.compare_exchange(
-        false, true, Ordering::AcqRel, Ordering::Relaxed
-    ).is_ok() {
+    if CLEANUP_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
         // Avoid logging during destruction as it might trigger thread-local access
         // that can panic if TLS is already destroyed
 

@@ -2,10 +2,10 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use tracing::{error, info, warn};
 
-use crate::commands::{Command, Response, State, HookConfig};
+use crate::commands::{Command, HookConfig, Response, State};
+use crate::recorder::SerializableCallRecord;
 use crate::state::LOCAL_STATE;
 use crate::strategy::FaultStrategy;
-use crate::recorder::SerializableCallRecord;
 
 // shared state removed - local state only
 
@@ -46,7 +46,10 @@ pub fn handle_command(cmd: Command) -> Response {
             info!(enabled = new_state, "fault injection toggled");
             Response {
                 status: "ok".to_string(),
-                message: format!("Fault injection {}", if new_state { "enabled" } else { "disabled" }),
+                message: format!(
+                    "Fault injection {}",
+                    if new_state { "enabled" } else { "disabled" }
+                ),
                 state: Some(get_current_state()),
                 recording_data: None,
             }
@@ -57,7 +60,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_probability(value);
                     drop(strategy);
-                            info!(probability = value, "probability set");
+                    info!(probability = value, "probability set");
                     Response {
                         status: "ok".to_string(),
                         message: format!("Probability set to {}%", value),
@@ -110,7 +113,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         *strategy = FaultStrategy::new_random_with_codes(current_prob, error_codes);
                     }
                     drop(strategy);
-                            info!("switched to random fault strategy");
+                    info!("switched to random fault strategy");
                     Response {
                         status: "ok".to_string(),
                         message: "Strategy set to random".to_string(),
@@ -121,10 +124,11 @@ pub fn handle_command(cmd: Command) -> Response {
                     if error_codes.is_empty() {
                         *strategy = FaultStrategy::new_pattern(pattern.clone());
                     } else {
-                        *strategy = FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
+                        *strategy =
+                            FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
                     }
                     drop(strategy);
-                            info!(pattern = %pattern, "switched to pattern fault strategy");
+                    info!(pattern = %pattern, "switched to pattern fault strategy");
                     Response {
                         status: "ok".to_string(),
                         message: format!("Strategy set to pattern: {}", pattern),
@@ -207,14 +211,12 @@ pub fn handle_command(cmd: Command) -> Response {
                 }
             }
         }
-        "status" => {
-            Response {
-                status: "ok".to_string(),
-                message: "Current state".to_string(),
-                state: Some(get_current_state()),
-                recording_data: None,
-            }
-        }
+        "status" => Response {
+            status: "ok".to_string(),
+            message: "Current state".to_string(),
+            state: Some(get_current_state()),
+            recording_data: None,
+        },
         "stats" => {
             let stats_message = format!(
                 "Local Process Statistics (PID {}):\n\
@@ -244,7 +246,10 @@ pub fn handle_command(cmd: Command) -> Response {
             info!(recording_enabled = new_state, "call recording toggled");
             Response {
                 status: "ok".to_string(),
-                message: format!("Call recording {}", if new_state { "enabled" } else { "disabled" }),
+                message: format!(
+                    "Call recording {}",
+                    if new_state { "enabled" } else { "disabled" }
+                ),
                 state: Some(get_current_state()),
                 recording_data: None,
             }
@@ -274,7 +279,8 @@ pub fn handle_command(cmd: Command) -> Response {
                 }
                 "records" => {
                     let count = cmd.value.unwrap_or(100) as usize;
-                    let records: Vec<SerializableCallRecord> = LOCAL_STATE.call_recorder
+                    let records: Vec<SerializableCallRecord> = LOCAL_STATE
+                        .call_recorder
                         .get_recent_records(count)
                         .into_iter()
                         .map(SerializableCallRecord::from)
@@ -302,9 +308,15 @@ pub fn handle_command(cmd: Command) -> Response {
             let pid = std::process::id();
             let filename = format!("ucx-fault-dump-{}-pid{}-{}.json", format, pid, timestamp);
 
-            let file_result = match std::fs::write(&filename, serde_json::to_string_pretty(&recording_data).unwrap_or_default()) {
+            let file_result = match std::fs::write(
+                &filename,
+                serde_json::to_string_pretty(&recording_data).unwrap_or_default(),
+            ) {
                 Ok(()) => format!("Recording data exported to {}", filename),
-                Err(e) => format!("Recording data exported in {} format (file write failed: {})", format, e)
+                Err(e) => format!(
+                    "Recording data exported in {} format (file write failed: {})",
+                    format, e
+                ),
             };
 
             Response {
@@ -328,14 +340,19 @@ pub fn handle_command(cmd: Command) -> Response {
             } else {
                 // Create new strategy from recorded pattern
                 let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                *strategy = FaultStrategy::from_recorded_pattern(pattern.clone(), error_codes.clone());
+                *strategy =
+                    FaultStrategy::from_recorded_pattern(pattern.clone(), error_codes.clone());
                 drop(strategy);
 
                 info!(pattern = %pattern, error_codes = ?error_codes, "replaying recorded pattern");
                 Response {
                     status: "ok".to_string(),
-                    message: format!("Replaying recorded pattern: {} ({} calls, {} error codes)",
-                                   pattern, pattern.len(), error_codes.len()),
+                    message: format!(
+                        "Replaying recorded pattern: {} ({} calls, {} error codes)",
+                        pattern,
+                        pattern.len(),
+                        error_codes.len()
+                    ),
                     state: Some(get_current_state()),
                     recording_data: Some(serde_json::json!({
                         "replayed_pattern": pattern,
@@ -360,7 +377,8 @@ pub fn handle_command(cmd: Command) -> Response {
                 } else {
                     Response {
                         status: "error".to_string(),
-                        message: "Invalid pattern. Use only 'X' (fault) and 'O' (pass) characters".to_string(),
+                        message: "Invalid pattern. Use only 'X' (fault) and 'O' (pass) characters"
+                            .to_string(),
                         state: None,
                         recording_data: None,
                     }
@@ -468,14 +486,12 @@ pub fn handle_command(cmd: Command) -> Response {
                 }
             }
         }
-        _ => {
-            Response {
-                status: "error".to_string(),
-                message: format!("Unknown command: {}", cmd.command),
-                state: None,
-                recording_data: None,
-            }
-        }
+        _ => Response {
+            status: "error".to_string(),
+            message: format!("Unknown command: {}", cmd.command),
+            state: None,
+            recording_data: None,
+        },
     }
 }
 
@@ -510,7 +526,11 @@ pub fn start_file_watcher() {
             .unwrap_or_default()
             .as_secs();
         LAST_PROCESSED.store(current_time, std::sync::atomic::Ordering::Relaxed);
-        info!(pid = std::process::id(), start_time = current_time, "initialized file watcher to only process new commands");
+        info!(
+            pid = std::process::id(),
+            start_time = current_time,
+            "initialized file watcher to only process new commands"
+        );
 
         // Set up file watcher
         let (tx, rx) = mpsc::channel();
@@ -527,14 +547,21 @@ pub fn start_file_watcher() {
             return;
         }
 
-        info!(command_file, pid = std::process::id(), "file watcher started");
+        info!(
+            command_file,
+            pid = std::process::id(),
+            "file watcher started"
+        );
 
         // Skip processing initial file content to avoid replaying old commands
 
         // Watch for file changes
         for res in rx {
             match res {
-                Ok(Event { kind: EventKind::Modify(_), .. }) => {
+                Ok(Event {
+                    kind: EventKind::Modify(_),
+                    ..
+                }) => {
                     process_command_file(command_file, &LAST_PROCESSED);
                 }
                 Ok(_) => {} // Ignore other events
@@ -620,4 +647,78 @@ fn process_command_file(file_path: &str, last_processed: &std::sync::atomic::Ato
     if new_last > current_last {
         last_processed.store(new_last, Ordering::Relaxed);
     }
+}
+
+// UDS-based socket server for per-process control
+pub fn start_socket_server() {
+    use std::io::{BufReader, BufWriter, Write};
+    use std::os::unix::net::UnixListener;
+
+    thread::spawn(move || {
+        let pid = std::process::id();
+        let socket_path = format!("/tmp/ucx-fault-{}.sock", pid);
+
+        // Remove stale socket if it exists
+        let _ = std::fs::remove_file(&socket_path);
+
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                error!(socket_path, error = %e, "failed to bind unix socket");
+                return;
+            }
+        };
+
+        info!(socket_path, pid, "UDS socket server started");
+
+        // Cleanup socket on thread exit
+        let cleanup_path = socket_path.clone();
+        let _cleanup_guard = scopeguard::guard((), move |_| {
+            let _ = std::fs::remove_file(&cleanup_path);
+        });
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let reader = BufReader::new(&stream);
+                    let mut writer = BufWriter::new(&stream);
+
+                    // Read command from stream
+                    let cmd: Command = match serde_json::from_reader(reader) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(error = %e, "failed to parse command from socket");
+                            continue;
+                        }
+                    };
+
+                    // Process command
+                    let is_status_cmd = cmd.command == "status" || cmd.command == "stats";
+                    let response = handle_command(cmd);
+
+                    // Send response back
+                    if let Err(e) = serde_json::to_writer(&mut writer, &response) {
+                        warn!(error = %e, "failed to write response to socket");
+                        continue;
+                    }
+
+                    if let Err(e) = writer.flush() {
+                        warn!(error = %e, "failed to flush response to socket");
+                        continue;
+                    }
+
+                    if is_status_cmd {
+                        info!(pid, response = %response.message, state = ?response.state, "processed socket command");
+                    } else if let Some(recording_data) = &response.recording_data {
+                        info!(pid, response = %response.message, recording_data = %recording_data, "processed socket command");
+                    } else {
+                        info!(pid, response = %response.message, "processed socket command");
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "failed to accept socket connection");
+                }
+            }
+        }
+    });
 }

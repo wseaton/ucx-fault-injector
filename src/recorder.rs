@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::cell::UnsafeCell;
-use serde::{Serialize, Deserialize};
 use crate::ucx::UcsStatus;
+use serde::{Deserialize, Serialize};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum number of call records in the ring buffer
 pub const MAX_CALL_RECORDS: usize = 8192;
@@ -51,7 +51,11 @@ impl CallRecord {
 
     /// Get the pattern character for this record
     pub fn to_pattern_char(&self) -> char {
-        if self.fault_injected { 'X' } else { 'O' }
+        if self.fault_injected {
+            'X'
+        } else {
+            'O'
+        }
     }
 }
 
@@ -128,7 +132,8 @@ impl CallRecordBuffer {
 
     /// Enable or disable recording
     pub fn set_recording_enabled(&self, enabled: bool) {
-        self.recording_enabled.store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+        self.recording_enabled
+            .store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     /// Check if recording is enabled
@@ -224,10 +229,13 @@ impl CallRecordBuffer {
             let record_index = (start_index + i) % MAX_CALL_RECORDS;
             let record = unsafe { (*self.records.get())[record_index] };
 
-            if record.sequence > 0 && record.fault_injected && record.error_code != 0
-                && !error_codes.contains(&record.error_code) {
-                    error_codes.push(record.error_code);
-                }
+            if record.sequence > 0
+                && record.fault_injected
+                && record.error_code != 0
+                && !error_codes.contains(&record.error_code)
+            {
+                error_codes.push(record.error_code);
+            }
         }
 
         error_codes
@@ -367,10 +375,14 @@ impl CallRecordBuffer {
         }
 
         // restore metadata
-        self.total_records.store(backup.total_records, Ordering::Relaxed);
-        self.write_index.store(backup.write_index, Ordering::Relaxed);
-        self.recording_enabled.store(backup.recording_enabled, Ordering::Relaxed);
-        self.generation.store(backup.generation + 1, Ordering::Relaxed); // increment generation
+        self.total_records
+            .store(backup.total_records, Ordering::Relaxed);
+        self.write_index
+            .store(backup.write_index, Ordering::Relaxed);
+        self.recording_enabled
+            .store(backup.recording_enabled, Ordering::Relaxed);
+        self.generation
+            .store(backup.generation + 1, Ordering::Relaxed); // increment generation
 
         // restore records to buffer
         unsafe {

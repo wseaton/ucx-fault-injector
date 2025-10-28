@@ -1,4 +1,4 @@
-use libc::{c_void, c_int};
+use libc::{c_int, c_void};
 
 // UCX types and constants
 pub type UcsStatus = c_int;

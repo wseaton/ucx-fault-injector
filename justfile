@@ -59,9 +59,41 @@ lint:
 # Check everything
 check: fmt lint build
 
-# Bump version (patch, minor, or major)
-bump-version level="patch":
+# Bump version (patch, minor, or major) and create release
+bump level="patch":
+    #!/usr/bin/env bash
+    set -e
+
+    # check if cargo-edit is installed
+    if ! command -v cargo-set-version &> /dev/null; then
+        echo "❌ cargo-edit not installed. Installing..."
+        cargo install cargo-edit
+    fi
+
+    # get current version
+    OLD_VERSION=$(grep -m1 'version = ' Cargo.toml | cut -d'"' -f2)
+    echo "Current version: ${OLD_VERSION}"
+
+    # bump version based on level
     cargo set-version --bump {{level}}
+
+    # get new version
+    NEW_VERSION=$(grep -m1 'version = ' Cargo.toml | cut -d'"' -f2)
+    TAG="v${NEW_VERSION}"
+
+    echo "Bumped version: ${OLD_VERSION} → ${NEW_VERSION}"
+
+    # commit changes
+    git add Cargo.toml Cargo.lock
+    git commit -m "bump version to ${NEW_VERSION}"
+
+    # create and push tag
+    git tag -a "${TAG}" -m "Release ${TAG}"
+
+    echo "✅ Version bumped to ${NEW_VERSION}"
+    echo "✅ Changes committed and tagged as ${TAG}"
+    echo ""
+    echo "Push with: git push && git push origin ${TAG}"
 
 # Show help for signal-based fault control
 help-signals:

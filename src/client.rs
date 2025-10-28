@@ -1,15 +1,43 @@
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 fn validate_probability(s: &str) -> Result<f64, String> {
-    let value: f64 = s.parse()
+    let value: f64 = s
+        .parse()
         .map_err(|_| format!("'{}' is not a valid number", s))?;
 
-    if value < 0.0 || value > 100.0 {
-        return Err(format!("probability must be between 0.0 and 100.0, got {}", value));
+    if !(0.0..=100.0).contains(&value) {
+        return Err(format!(
+            "probability must be between 0.0 and 100.0, got {}",
+            value
+        ));
     }
 
     Ok(value)
+}
+
+// IPC backend selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpcBackend {
+    Socket, // Unix domain socket (default)
+    File,   // File-based watching (legacy)
+}
+
+impl IpcBackend {
+    fn from_env() -> Self {
+        match std::env::var("UCX_FAULT_IPC_BACKEND").as_deref() {
+            Ok("file") => IpcBackend::File,
+            Ok("socket") => IpcBackend::Socket,
+            _ => IpcBackend::Socket, // default to socket
+        }
+    }
+}
+
+// Response structure from server
+#[derive(Deserialize, Debug)]
+struct Response {
+    status: String,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -84,12 +112,11 @@ enum Commands {
     Replay,
 }
 
-
 fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    use nix::fcntl::{Flock, FlockArg};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use nix::fcntl::{Flock, FlockArg};
 
     let command_file = "/tmp/ucx-fault-commands";
     let lock_file = "/tmp/ucx-fault-commands.lock";
@@ -98,7 +125,7 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     let lock_fd = OpenOptions::new()
         .create(true)
         .truncate(false)
-	.write(true)
+        .write(true)
         .open(lock_file)?;
 
     // Acquire exclusive lock
@@ -123,7 +150,7 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(false)
-	.append(true)
+        .append(true)
         .open(command_file)?;
 
     writeln!(file, "{}", command_json)?;
@@ -133,6 +160,92 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     println!("Command file: {}", command_file);
 
     Ok(())
+}
+
+fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    use glob::glob;
+    use std::io::{BufReader, BufWriter, Write};
+    use std::os::unix::net::UnixStream;
+
+    // Discover all socket files
+    let socket_pattern = "/tmp/ucx-fault-*.sock";
+    let sockets: Vec<_> = glob(socket_pattern)?.filter_map(Result::ok).collect();
+
+    if sockets.is_empty() {
+        eprintln!(
+            "No UCX fault injector processes found (no sockets at {})",
+            socket_pattern
+        );
+        eprintln!("Make sure a process with LD_PRELOAD is running.");
+        return Err("No target processes found".into());
+    }
+
+    println!("Found {} injected process(es)", sockets.len());
+    println!();
+
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for socket_path in sockets {
+        // Extract PID from socket path
+        let pid = socket_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.strip_prefix("ucx-fault-"))
+            .and_then(|s| s.strip_suffix(".sock"))
+            .unwrap_or("unknown");
+
+        // Connect to socket
+        let stream = match UnixStream::connect(&socket_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[PID {}] Failed to connect: {}", pid, e);
+                error_count += 1;
+                continue;
+            }
+        };
+
+        let mut writer = BufWriter::new(&stream);
+        let reader = BufReader::new(&stream);
+
+        // Send command
+        if let Err(e) = serde_json::to_writer(&mut writer, &command) {
+            eprintln!("[PID {}] Failed to send command: {}", pid, e);
+            error_count += 1;
+            continue;
+        }
+
+        if let Err(e) = writer.flush() {
+            eprintln!("[PID {}] Failed to flush command: {}", pid, e);
+            error_count += 1;
+            continue;
+        }
+
+        // Read response
+        let response: Response = match serde_json::from_reader(reader) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[PID {}] Failed to read response: {}", pid, e);
+                error_count += 1;
+                continue;
+            }
+        };
+
+        println!("[PID {}] {}: {}", pid, response.status, response.message);
+        success_count += 1;
+    }
+
+    println!();
+    println!(
+        "Summary: {} succeeded, {} failed",
+        success_count, error_count
+    );
+
+    if error_count > 0 {
+        Err(format!("{} process(es) failed to respond", error_count).into())
+    } else {
+        Ok(())
+    }
 }
 
 fn main() {
@@ -229,10 +342,19 @@ fn main() {
         },
     };
 
-    // Send command via file
-    match send_command_file(command) {
+    // Determine IPC backend and send command
+    let ipc_backend = IpcBackend::from_env();
+
+    let result = match ipc_backend {
+        IpcBackend::Socket => send_command_socket(command),
+        IpcBackend::File => send_command_file(command),
+    };
+
+    match result {
         Ok(()) => {
-            println!("Command broadcast successfully");
+            if ipc_backend == IpcBackend::File {
+                println!("Command broadcast successfully");
+            }
         }
         Err(e) => {
             eprintln!("Error broadcasting command: {}", e);

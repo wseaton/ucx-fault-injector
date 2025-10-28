@@ -28,7 +28,10 @@ fn main() {
 
         // Try pkg-config first, fallback to manual paths
         if pkg_config::Config::new().probe("ucx").is_err() {
-            eprintln!("pkg-config failed, using manual UCX paths: {}", ucx_prefix.display());
+            eprintln!(
+                "pkg-config failed, using manual UCX paths: {}",
+                ucx_prefix.display()
+            );
             if target_os == "macos" {
                 println!("cargo:rustc-link-lib=dylib=ucp");
                 println!("cargo:rustc-link-lib=dylib=ucs");

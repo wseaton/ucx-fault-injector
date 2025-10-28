@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 use tracing::info;
 
-use crate::strategy::FaultStrategy;
 use crate::recorder::CallRecordBuffer;
+use crate::strategy::FaultStrategy;
 
 // configuration for which UCX function hooks are enabled
 #[derive(Debug, Clone)]
@@ -17,8 +17,8 @@ pub struct HookConfiguration {
 impl Default for HookConfiguration {
     fn default() -> Self {
         Self {
-            ucp_get_nbx_enabled: true,   // reads enabled by default
-            ucp_put_nbx_enabled: true,   // writes enabled by default
+            ucp_get_nbx_enabled: true,      // reads enabled by default
+            ucp_put_nbx_enabled: true,      // writes enabled by default
             ucp_ep_flush_nbx_enabled: true, // flush enabled by default
         }
     }
@@ -80,9 +80,7 @@ pub fn is_in_intercept() -> bool {
     }
 
     // safely access thread local, returning false if TLS is destroyed
-    std::panic::catch_unwind(|| {
-        IN_INTERCEPT.with(|flag| *flag.borrow())
-    }).unwrap_or(false)
+    std::panic::catch_unwind(|| IN_INTERCEPT.with(|flag| *flag.borrow())).unwrap_or(false)
 }
 
 pub fn set_in_intercept(value: bool) {
@@ -91,7 +89,5 @@ pub fn set_in_intercept(value: bool) {
     }
 
     // safely set thread local, ignoring if TLS is destroyed
-    let _ = std::panic::catch_unwind(|| {
-        IN_INTERCEPT.with(|flag| *flag.borrow_mut() = value)
-    });
+    let _ = std::panic::catch_unwind(|| IN_INTERCEPT.with(|flag| *flag.borrow_mut() = value));
 }

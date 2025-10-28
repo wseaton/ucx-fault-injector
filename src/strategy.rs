@@ -2,9 +2,18 @@ use crate::ucx::UcsStatus;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectionMethod {
-    Random { probability: u32 },
-    Pattern { pattern: String, current_position: usize },
-    Replay { pattern: String, error_mapping: Vec<UcsStatus>, current_position: usize },
+    Random {
+        probability: u32,
+    },
+    Pattern {
+        pattern: String,
+        current_position: usize,
+    },
+    Replay {
+        pattern: String,
+        error_mapping: Vec<UcsStatus>,
+        current_position: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,7 +57,10 @@ impl FaultStrategy {
                 crate::ucx::UCS_ERR_UNREACHABLE,
                 crate::ucx::UCS_ERR_TIMED_OUT,
             ],
-            selection_method: SelectionMethod::Pattern { pattern, current_position: 0 },
+            selection_method: SelectionMethod::Pattern {
+                pattern,
+                current_position: 0,
+            },
         }
     }
 
@@ -64,7 +76,10 @@ impl FaultStrategy {
         };
         Self {
             error_codes: codes,
-            selection_method: SelectionMethod::Pattern { pattern, current_position: 0 },
+            selection_method: SelectionMethod::Pattern {
+                pattern,
+                current_position: 0,
+            },
         }
     }
 
@@ -83,7 +98,8 @@ impl FaultStrategy {
     /// Create pattern from recorded calls with perfect error code preservation
     pub fn from_recorded_pattern(pattern: String, recorded_error_codes: Vec<i32>) -> Self {
         // convert i32 error codes back to UcsStatus
-        let error_mapping: Vec<UcsStatus> = recorded_error_codes.into_iter()
+        let error_mapping: Vec<UcsStatus> = recorded_error_codes
+            .into_iter()
             .map(|code| code as UcsStatus)
             .collect();
 
@@ -108,7 +124,11 @@ impl FaultStrategy {
                 use std::time::{SystemTime, UNIX_EPOCH};
 
                 let mut hasher = DefaultHasher::new();
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+                    .hash(&mut hasher);
                 let random = (hasher.finish() % 100) as u32;
 
                 if random < *probability {
@@ -119,12 +139,18 @@ impl FaultStrategy {
                     None
                 }
             }
-            SelectionMethod::Pattern { pattern, current_position } => {
+            SelectionMethod::Pattern {
+                pattern,
+                current_position,
+            } => {
                 if pattern.is_empty() || self.error_codes.is_empty() {
                     return None;
                 }
 
-                let pattern_char = pattern.chars().nth(*current_position % pattern.len()).unwrap_or('O');
+                let pattern_char = pattern
+                    .chars()
+                    .nth(*current_position % pattern.len())
+                    .unwrap_or('O');
                 *current_position += 1;
 
                 if pattern_char == 'X' {
@@ -135,17 +161,25 @@ impl FaultStrategy {
                     None
                 }
             }
-            SelectionMethod::Replay { pattern, error_mapping, current_position } => {
+            SelectionMethod::Replay {
+                pattern,
+                error_mapping,
+                current_position,
+            } => {
                 if pattern.is_empty() {
                     return None;
                 }
 
-                let pattern_char = pattern.chars().nth(*current_position % pattern.len()).unwrap_or('O');
+                let pattern_char = pattern
+                    .chars()
+                    .nth(*current_position % pattern.len())
+                    .unwrap_or('O');
                 *current_position += 1;
 
                 if pattern_char == 'X' {
                     // find which 'X' this is in the pattern to map to correct error code
-                    let x_count = pattern.chars()
+                    let x_count = pattern
+                        .chars()
                         .take(*current_position)
                         .filter(|&c| c == 'X')
                         .count();
@@ -165,7 +199,10 @@ impl FaultStrategy {
     }
 
     pub fn set_probability(&mut self, probability: u32) {
-        if let SelectionMethod::Random { probability: ref mut p } = &mut self.selection_method {
+        if let SelectionMethod::Random {
+            probability: ref mut p,
+        } = &mut self.selection_method
+        {
             *p = probability;
         }
     }
@@ -189,17 +226,27 @@ impl FaultStrategy {
 
     pub fn set_pattern(&mut self, pattern: String) {
         match &mut self.selection_method {
-            SelectionMethod::Pattern { pattern: ref mut p, current_position } => {
+            SelectionMethod::Pattern {
+                pattern: ref mut p,
+                current_position,
+            } => {
                 *p = pattern;
                 *current_position = 0;
             }
-            SelectionMethod::Replay { pattern: ref mut p, current_position, .. } => {
+            SelectionMethod::Replay {
+                pattern: ref mut p,
+                current_position,
+                ..
+            } => {
                 *p = pattern;
                 *current_position = 0;
             }
             _ => {
                 // Convert to pattern mode
-                self.selection_method = SelectionMethod::Pattern { pattern, current_position: 0 };
+                self.selection_method = SelectionMethod::Pattern {
+                    pattern,
+                    current_position: 0,
+                };
             }
         }
     }
