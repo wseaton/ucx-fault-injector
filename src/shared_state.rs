@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI32, AtomicU32, Ordering};
-use std::mem;
+use crate::recorder::{CallRecordBackup, CallRecordBuffer};
 use libc::c_void;
+use nix::fcntl::OFlag;
 use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
 use nix::sys::stat::Mode;
-use nix::fcntl::OFlag;
+use std::mem;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, info, warn};
-use crate::recorder::{CallRecordBuffer, CallRecordBackup};
 
 const MAGIC_NUMBER: u64 = 0xDEADBEEF12345678;
 const VERSION: u32 = 1;
@@ -15,33 +15,33 @@ const SHM_NAME: &str = "/ucx_fault_injector_state";
 #[repr(C, align(4096))]
 pub struct SharedFaultState {
     // Header for validation
-    pub magic: AtomicU64,           // Magic number for sanity checking
-    pub version: AtomicU32,         // Structure version
-    pub generation: AtomicU64,      // Incremented when config changes via ZMQ
+    pub magic: AtomicU64,      // Magic number for sanity checking
+    pub version: AtomicU32,    // Structure version
+    pub generation: AtomicU64, // Incremented when config changes via ZMQ
 
     // Process tracking for crash detection
-    pub ref_count: AtomicU32,       // Number of active processes
-    pub last_writer_pid: AtomicI32, // PID of last process to update config
+    pub ref_count: AtomicU32,        // Number of active processes
+    pub last_writer_pid: AtomicI32,  // PID of last process to update config
     pub last_update_time: AtomicU64, // Unix timestamp of last update
 
     // Fault injection configuration (updated via ZMQ)
-    pub enabled: AtomicBool,        // Global enable/disable
-    pub probability: AtomicU32,     // Fault probability 0-100
-    pub strategy_type: AtomicU32,   // 0=Random, 1=Pattern
+    pub enabled: AtomicBool,         // Global enable/disable
+    pub probability: AtomicU32,      // Fault probability 0-100
+    pub strategy_type: AtomicU32,    // 0=Random, 1=Pattern
     pub pattern_position: AtomicU64, // Current position in pattern (for pattern strategy)
     pub error_codes: [AtomicI32; 8], // Supported error codes (UCS_ERR_*)
     pub error_codes_len: AtomicU32,  // Number of valid error codes
 
     // Pattern synchronization (to prevent data races during updates)
-    pub pattern_lock: AtomicBool,   // Write lock for pattern updates
+    pub pattern_lock: AtomicBool, // Write lock for pattern updates
 
     // Pattern string (fixed size, null-terminated)
-    pub pattern: [u8; 256],         // Pattern string (X=fault, O=pass)
-    pub pattern_len: AtomicU32,     // Length of pattern string
+    pub pattern: [u8; 256],     // Pattern string (X=fault, O=pass)
+    pub pattern_len: AtomicU32, // Length of pattern string
 
     // Statistics (incremented by hooked functions)
-    pub total_calls: AtomicU64,     // Total number of intercepted calls
-    pub faults_injected: AtomicU64, // Number of faults injected
+    pub total_calls: AtomicU64,       // Total number of intercepted calls
+    pub faults_injected: AtomicU64,   // Number of faults injected
     pub calls_since_fault: AtomicU64, // Calls since last fault (for debugging)
 
     // Per-function call counters (expandable for other UCX functions)
@@ -87,8 +87,8 @@ impl SharedFaultState {
 
     // Validate shared memory is not corrupted
     pub fn is_valid(&self) -> bool {
-        self.magic.load(Ordering::Relaxed) == MAGIC_NUMBER &&
-        self.version.load(Ordering::Relaxed) == VERSION
+        self.magic.load(Ordering::Relaxed) == MAGIC_NUMBER
+            && self.version.load(Ordering::Relaxed) == VERSION
     }
 
     // Check if the shared memory appears to be abandoned
@@ -114,9 +114,7 @@ impl SharedFaultState {
         }
 
         // Check if process still exists using kill(pid, 0)
-        unsafe {
-            libc::kill(pid, 0) != 0 && nix::errno::Errno::last() == nix::errno::Errno::ESRCH
-        }
+        unsafe { libc::kill(pid, 0) != 0 && nix::errno::Errno::last() == nix::errno::Errno::ESRCH }
     }
 
     // Reset to default values (called when stale state detected)
@@ -135,7 +133,8 @@ impl SharedFaultState {
 
     // Update writer tracking info
     pub fn update_writer_info(&self) {
-        self.last_writer_pid.store(std::process::id() as i32, Ordering::Relaxed);
+        self.last_writer_pid
+            .store(std::process::id() as i32, Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -151,9 +150,11 @@ impl SharedFaultState {
 
         // Acquire exclusive write lock with timeout to avoid deadlock
         let start = std::time::Instant::now();
-        while self.pattern_lock.compare_exchange_weak(
-            false, true, Ordering::Acquire, Ordering::Relaxed
-        ).is_err() {
+        while self
+            .pattern_lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             if start.elapsed() > std::time::Duration::from_millis(100) {
                 warn!("pattern update timeout - aborting to avoid deadlock");
                 return;
@@ -174,11 +175,12 @@ impl SharedFaultState {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
                 self.pattern.as_ptr() as *mut u8,
-                bytes.len()
+                bytes.len(),
             );
 
             // Make pattern valid again
-            self.pattern_len.store(pattern.len() as u32, Ordering::Release);
+            self.pattern_len
+                .store(pattern.len() as u32, Ordering::Release);
         }
 
         self.pattern_position.store(0, Ordering::Relaxed); // Reset position
@@ -287,11 +289,7 @@ impl SharedStateManager {
                 // Segment already exists, try to open it
                 debug!("shared memory segment exists, attempting to open");
 
-                let fd = shm_open(
-                    SHM_NAME,
-                    OFlag::O_RDWR,
-                    Mode::empty(),
-                )?;
+                let fd = shm_open(SHM_NAME, OFlag::O_RDWR, Mode::empty())?;
 
                 // Map the existing memory
                 let ptr = unsafe {
@@ -319,7 +317,9 @@ impl SharedStateManager {
                         (*state_ptr).update_writer_info();
 
                         // restore the recording data
-                        (*state_ptr).call_recorder.restore_from_backup(recording_backup);
+                        (*state_ptr)
+                            .call_recorder
+                            .restore_from_backup(recording_backup);
                         info!("restored recording data after reinitialization");
                     } else if (*state_ptr).is_stale() {
                         (*state_ptr).reset_to_defaults();
@@ -368,7 +368,12 @@ impl Drop for SharedStateManager {
         }
 
         // Unmap the memory from this process (always safe)
-        if let Err(_) = unsafe { munmap(std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void), self.size) } {
+        if let Err(_) = unsafe {
+            munmap(
+                std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void),
+                self.size,
+            )
+        } {
             // Silent failure during cleanup to avoid logging issues during destruction
         }
 
@@ -385,7 +390,9 @@ use once_cell::sync::OnceCell;
 static SHARED_STATE_MANAGER: OnceCell<SharedStateManager> = OnceCell::new();
 
 pub fn get_shared_state() -> Option<&'static SharedFaultState> {
-    SHARED_STATE_MANAGER.get().map(|manager| manager.get_state())
+    SHARED_STATE_MANAGER
+        .get()
+        .map(|manager| manager.get_state())
 }
 
 pub fn init_shared_state() -> Result<(), Box<dyn std::error::Error>> {
