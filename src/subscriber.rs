@@ -652,7 +652,7 @@ fn process_command_file(file_path: &str, last_processed: &std::sync::atomic::Ato
 
 // UDS-based socket server for per-process control
 pub fn start_socket_server() {
-    use std::io::{BufReader, BufWriter, Write};
+    use std::io::{BufRead, BufReader, BufWriter, Write};
     use std::os::unix::net::UnixListener;
 
     thread::spawn(move || {
@@ -681,14 +681,31 @@ pub fn start_socket_server() {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let reader = BufReader::new(&stream);
+                    // set timeouts to prevent hanging on slow/stuck clients
+                    let timeout = std::time::Duration::from_secs(5);
+                    if let Err(e) = stream.set_read_timeout(Some(timeout)) {
+                        warn!(error = %e, "failed to set read timeout");
+                        continue;
+                    }
+                    if let Err(e) = stream.set_write_timeout(Some(timeout)) {
+                        warn!(error = %e, "failed to set write timeout");
+                        continue;
+                    }
+
+                    let mut reader = BufReader::new(&stream);
                     let mut writer = BufWriter::new(&stream);
 
-                    // Read command from stream
-                    let cmd: Command = match serde_json::from_reader(reader) {
+                    // Read line-delimited JSON command from stream
+                    let mut line = String::new();
+                    if let Err(e) = reader.read_line(&mut line) {
+                        warn!(error = %e, "failed to read line from socket");
+                        continue;
+                    }
+
+                    let cmd: Command = match serde_json::from_str(&line) {
                         Ok(c) => c,
                         Err(e) => {
-                            warn!(error = %e, "failed to parse command from socket");
+                            warn!(error = %e, line = %line.trim(), "failed to parse command from socket");
                             continue;
                         }
                     };
@@ -697,9 +714,14 @@ pub fn start_socket_server() {
                     let is_status_cmd = cmd.command == "status" || cmd.command == "stats";
                     let response = handle_command(cmd);
 
-                    // Send response back
+                    // Send response back with newline delimiter
                     if let Err(e) = serde_json::to_writer(&mut writer, &response) {
                         warn!(error = %e, "failed to write response to socket");
+                        continue;
+                    }
+
+                    if let Err(e) = writeln!(writer) {
+                        warn!(error = %e, "failed to write newline delimiter");
                         continue;
                     }
 

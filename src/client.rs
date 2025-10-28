@@ -168,7 +168,7 @@ fn is_process_alive(pid: u32) -> bool {
 
 fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     use glob::glob;
-    use std::io::{BufReader, BufWriter, Write};
+    use std::io::{BufRead, BufReader, BufWriter, Write};
     use std::os::unix::net::UnixStream;
 
     // Discover all socket files
@@ -235,12 +235,31 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
             }
         };
 
-        let mut writer = BufWriter::new(&stream);
-        let reader = BufReader::new(&stream);
+        // set read/write timeouts to prevent hanging on unresponsive processes
+        let timeout = std::time::Duration::from_secs(5);
+        if let Err(e) = stream.set_read_timeout(Some(timeout)) {
+            warn!(pid, error = %e, "failed to set read timeout");
+            error_count += 1;
+            continue;
+        }
+        if let Err(e) = stream.set_write_timeout(Some(timeout)) {
+            warn!(pid, error = %e, "failed to set write timeout");
+            error_count += 1;
+            continue;
+        }
 
-        // Send command
+        let mut writer = BufWriter::new(&stream);
+        let mut reader = BufReader::new(&stream);
+
+        // Send command with newline delimiter
         if let Err(e) = serde_json::to_writer(&mut writer, &command) {
             error!(pid, error = %e, "failed to send command");
+            error_count += 1;
+            continue;
+        }
+
+        if let Err(e) = writeln!(writer) {
+            error!(pid, error = %e, "failed to write newline delimiter");
             error_count += 1;
             continue;
         }
@@ -251,11 +270,18 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
             continue;
         }
 
-        // Read response
-        let response: Response = match serde_json::from_reader(reader) {
+        // Read line-delimited JSON response
+        let mut response_line = String::new();
+        if let Err(e) = reader.read_line(&mut response_line) {
+            error!(pid, error = %e, "failed to read response line");
+            error_count += 1;
+            continue;
+        }
+
+        let response: Response = match serde_json::from_str(&response_line) {
             Ok(r) => r,
             Err(e) => {
-                error!(pid, error = %e, "failed to read response");
+                error!(pid, error = %e, line = %response_line.trim(), "failed to parse response");
                 error_count += 1;
                 continue;
             }

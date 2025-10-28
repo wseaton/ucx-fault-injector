@@ -156,3 +156,132 @@ fn test_set_error_codes_command() {
         assert_eq!(state.error_codes, vec![-4, -15]);
     }
 }
+
+#[test]
+fn test_socket_protocol_serialization() {
+    use std::io::{BufRead, BufReader, Write};
+
+    // test command serialization with newline delimiter
+    let cmd = Command {
+        command: "set_probability".to_string(),
+        value: Some(42.5),
+        pattern: None,
+        error_codes: None,
+        recording_enabled: None,
+        export_format: None,
+        hook_name: None,
+    };
+
+    // serialize to buffer
+    let mut buf = Vec::new();
+    serde_json::to_writer(&mut buf, &cmd).unwrap();
+    writeln!(&mut buf).unwrap();
+
+    // deserialize from buffer
+    let mut reader = BufReader::new(&buf[..]);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let deserialized: Command = serde_json::from_str(&line).unwrap();
+
+    assert_eq!(deserialized.command, "set_probability");
+    assert_eq!(deserialized.value, Some(42.5));
+}
+
+#[test]
+fn test_socket_protocol_response() {
+    use crate::commands::Response;
+    use std::io::{BufRead, BufReader, Write};
+
+    // create a test response
+    let response = Response {
+        status: "ok".to_string(),
+        message: "Probability set to 50.0%".to_string(),
+        state: None,
+        recording_data: None,
+    };
+
+    // serialize with newline delimiter
+    let mut buf = Vec::new();
+    serde_json::to_writer(&mut buf, &response).unwrap();
+    writeln!(&mut buf).unwrap();
+
+    // deserialize
+    let mut reader = BufReader::new(&buf[..]);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let deserialized: Response = serde_json::from_str(&line).unwrap();
+
+    assert_eq!(deserialized.status, "ok");
+    assert_eq!(deserialized.message, "Probability set to 50.0%");
+}
+
+#[test]
+fn test_command_roundtrip() {
+    // test probability command with float value
+    let cmd = Command {
+        command: "set_probability".to_string(),
+        value: Some(0.5), // fractional probability
+        pattern: None,
+        error_codes: None,
+        recording_enabled: None,
+        export_format: None,
+        hook_name: None,
+    };
+
+    let response = handle_command(cmd);
+    assert_eq!(response.status, "ok");
+    assert!(response.message.contains("0.5"));
+}
+
+#[test]
+fn test_set_probability_with_float() {
+    // test that float probabilities are properly converted to u32
+    let cmd = Command {
+        command: "set_probability".to_string(),
+        value: Some(75.5),
+        pattern: None,
+        error_codes: None,
+        recording_enabled: None,
+        export_format: None,
+        hook_name: None,
+    };
+
+    let response = handle_command(cmd);
+    assert_eq!(response.status, "ok");
+
+    // verify internal state was set correctly (truncated to 75)
+    let state = get_current_state();
+    assert_eq!(state.probability, 75);
+}
+
+#[test]
+fn test_invalid_probability_range() {
+    // test probability > 100
+    let cmd = Command {
+        command: "set_probability".to_string(),
+        value: Some(150.0),
+        pattern: None,
+        error_codes: None,
+        recording_enabled: None,
+        export_format: None,
+        hook_name: None,
+    };
+
+    let response = handle_command(cmd);
+    assert_eq!(response.status, "error");
+    assert!(response.message.contains("0.0-100.0"));
+
+    // test negative probability
+    let cmd = Command {
+        command: "set_probability".to_string(),
+        value: Some(-10.0),
+        pattern: None,
+        error_codes: None,
+        recording_enabled: None,
+        export_format: None,
+        hook_name: None,
+    };
+
+    let response = handle_command(cmd);
+    assert_eq!(response.status, "error");
+}

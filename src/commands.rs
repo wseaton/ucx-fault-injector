@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 // Socket API command and response structures
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Command {
     pub command: String,
     pub value: Option<f64>,
@@ -12,7 +12,7 @@ pub struct Command {
     pub hook_name: Option<String>, // for hook-specific enable/disable
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Response {
     pub status: String,
     pub message: String,
@@ -20,7 +20,7 @@ pub struct Response {
     pub recording_data: Option<serde_json::Value>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct State {
     pub enabled: bool,
     pub probability: u32,
@@ -33,7 +33,7 @@ pub struct State {
     pub hook_config: HookConfig,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct HookConfig {
     pub ucp_get_nbx_enabled: bool,
     pub ucp_put_nbx_enabled: bool,
