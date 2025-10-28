@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use tracing::{error, info, warn};
 
 fn validate_probability(s: &str) -> Result<f64, String> {
     let value: f64 = s
@@ -156,10 +157,13 @@ fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>>
     writeln!(file, "{}", command_json)?;
     file.sync_all()?;
 
-    println!("Command written to file: {}", command_json);
-    println!("Command file: {}", command_file);
+    info!(command_file, command = %command_json, "command written to file");
 
     Ok(())
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    std::fs::metadata(format!("/proc/{}", pid)).is_ok()
 }
 
 fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -169,19 +173,45 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
 
     // Discover all socket files
     let socket_pattern = "/tmp/ucx-fault-*.sock";
-    let sockets: Vec<_> = glob(socket_pattern)?.filter_map(Result::ok).collect();
+    let all_sockets: Vec<_> = glob(socket_pattern)?.filter_map(Result::ok).collect();
+
+    // filter out stale sockets from dead processes
+    let mut sockets = Vec::new();
+    let mut cleaned_count = 0;
+
+    for socket_path in all_sockets {
+        let pid_str = socket_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.strip_prefix("ucx-fault-"))
+            .and_then(|s| s.strip_suffix(".sock"));
+
+        if let Some(pid_str) = pid_str {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                if is_process_alive(pid) {
+                    sockets.push(socket_path);
+                } else {
+                    // clean up stale socket
+                    let _ = std::fs::remove_file(&socket_path);
+                    cleaned_count += 1;
+                }
+                continue;
+            }
+        }
+        // keep sockets we can't parse (shouldn't happen)
+        sockets.push(socket_path);
+    }
+
+    if cleaned_count > 0 {
+        info!(count = cleaned_count, "cleaned up stale socket(s)");
+    }
 
     if sockets.is_empty() {
-        eprintln!(
-            "No UCX fault injector processes found (no sockets at {})",
-            socket_pattern
-        );
-        eprintln!("Make sure a process with LD_PRELOAD is running.");
+        error!(socket_pattern, "no UCX fault injector processes found");
         return Err("No target processes found".into());
     }
 
-    println!("Found {} injected process(es)", sockets.len());
-    println!();
+    info!(count = sockets.len(), "found active injected process(es)");
 
     let mut success_count = 0;
     let mut error_count = 0;
@@ -199,7 +229,7 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
         let stream = match UnixStream::connect(&socket_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[PID {}] Failed to connect: {}", pid, e);
+                warn!(pid, error = %e, "failed to connect");
                 error_count += 1;
                 continue;
             }
@@ -210,13 +240,13 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
 
         // Send command
         if let Err(e) = serde_json::to_writer(&mut writer, &command) {
-            eprintln!("[PID {}] Failed to send command: {}", pid, e);
+            error!(pid, error = %e, "failed to send command");
             error_count += 1;
             continue;
         }
 
         if let Err(e) = writer.flush() {
-            eprintln!("[PID {}] Failed to flush command: {}", pid, e);
+            error!(pid, error = %e, "failed to flush command");
             error_count += 1;
             continue;
         }
@@ -225,30 +255,36 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
         let response: Response = match serde_json::from_reader(reader) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[PID {}] Failed to read response: {}", pid, e);
+                error!(pid, error = %e, "failed to read response");
                 error_count += 1;
                 continue;
             }
         };
 
-        println!("[PID {}] {}: {}", pid, response.status, response.message);
+        info!(pid, status = %response.status, message = %response.message, "command processed");
         success_count += 1;
     }
 
-    println!();
-    println!(
-        "Summary: {} succeeded, {} failed",
-        success_count, error_count
-    );
-
     if error_count > 0 {
+        warn!(
+            success_count,
+            error_count, "command broadcast completed with errors"
+        );
         Err(format!("{} process(es) failed to respond", error_count).into())
     } else {
+        info!(success_count, "command broadcast completed successfully");
         Ok(())
     }
 }
 
 fn main() {
+    // initialize tracing
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_level(true)
+        .compact()
+        .init();
+
     let cli = Cli::parse();
 
     let command = match cli.command {
@@ -350,15 +386,8 @@ fn main() {
         IpcBackend::File => send_command_file(command),
     };
 
-    match result {
-        Ok(()) => {
-            if ipc_backend == IpcBackend::File {
-                println!("Command broadcast successfully");
-            }
-        }
-        Err(e) => {
-            eprintln!("Error broadcasting command: {}", e);
-            std::process::exit(1);
-        }
+    if let Err(e) = result {
+        error!(backend = ?ipc_backend, error = %e, "failed to broadcast command");
+        std::process::exit(1);
     }
 }

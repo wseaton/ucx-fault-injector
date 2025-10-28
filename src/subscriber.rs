@@ -56,9 +56,10 @@ pub fn handle_command(cmd: Command) -> Response {
         }
         "set_probability" => {
             if let Some(value) = cmd.value {
-                if value <= 100 {
+                if (0.0..=100.0).contains(&value) {
+                    let probability_u32 = value as u32;
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_probability(value);
+                    strategy.set_probability(probability_u32);
                     drop(strategy);
                     info!(probability = value, "probability set");
                     Response {
@@ -70,7 +71,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 } else {
                     Response {
                         status: "error".to_string(),
-                        message: "Invalid probability. Must be 0-100".to_string(),
+                        message: "Invalid probability. Must be 0.0-100.0".to_string(),
                         state: None,
                         recording_data: None,
                     }
@@ -278,7 +279,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     })
                 }
                 "records" => {
-                    let count = cmd.value.unwrap_or(100) as usize;
+                    let count = cmd.value.unwrap_or(100.0) as usize;
                     let records: Vec<SerializableCallRecord> = LOCAL_STATE
                         .call_recorder
                         .get_recent_records(count)

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Debug)]
 pub struct Command {
     pub command: String,
-    pub value: Option<u32>,
+    pub value: Option<f64>,
     pub pattern: Option<String>,
     pub error_codes: Option<Vec<i32>>,
     pub recording_enabled: Option<bool>,
