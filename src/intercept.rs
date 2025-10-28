@@ -1,6 +1,6 @@
 use libc::{c_void, size_t};
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::state::{is_in_intercept, set_in_intercept, DEBUG_ENABLED, LOCAL_STATE};
 use crate::subscriber::get_current_state;
@@ -24,7 +24,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
         let symbol_name = CString::new("ucp_get_nbx").unwrap();
 
         // First try RTLD_NEXT - this should work for library interposition
-        info!(
+        debug!(
             pid = std::process::id(),
             "looking up symbol with RTLD_NEXT: ucp_get_nbx"
         );
@@ -32,12 +32,12 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
 
         // Check if we got our own function (infinite recursion trap)
         let our_function_addr = ucp_get_nbx as *const () as *mut c_void;
-        info!(
+        debug!(
             pid = std::process::id(),
             "Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr
         );
         if ptr == our_function_addr {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT returned our own function, skipping"
             );
@@ -45,16 +45,16 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT failed, trying RTLD_DEFAULT"
             );
             ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-            info!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
+            debug!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
 
             // Check again for our own function
             if ptr == our_function_addr {
-                info!(
+                debug!(
                     pid = std::process::id(),
                     "RTLD_DEFAULT returned our own function, skipping"
                 );
@@ -63,7 +63,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules"
             );
@@ -80,7 +80,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
                                 let path = &line[path_start + 1..];
                                 if path.starts_with('/') && !paths.contains(&path.to_string()) {
                                     paths.push(path.to_string());
-                                    info!(
+                                    debug!(
                                         pid = std::process::id(),
                                         "Found UCX library in memory map: {}", path
                                     );
@@ -103,7 +103,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_get_nbx in {}: {:?}", lib_path, ptr
                         );
@@ -124,7 +124,7 @@ pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_get_nbx in {}: {:?}", lib_name, ptr
                         );
@@ -152,7 +152,7 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
         let symbol_name = CString::new("ucp_put_nbx").unwrap();
 
         // First try RTLD_NEXT - this should work for library interposition
-        info!(
+        debug!(
             pid = std::process::id(),
             "looking up symbol with RTLD_NEXT: ucp_put_nbx"
         );
@@ -160,12 +160,12 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
 
         // Check if we got our own function (infinite recursion trap)
         let our_function_addr = ucp_put_nbx as *const () as *mut c_void;
-        info!(
+        debug!(
             pid = std::process::id(),
             "Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr
         );
         if ptr == our_function_addr {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT returned our own function, skipping"
             );
@@ -173,16 +173,16 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT failed, trying RTLD_DEFAULT"
             );
             ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-            info!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
+            debug!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
 
             // Check again for our own function
             if ptr == our_function_addr {
-                info!(
+                debug!(
                     pid = std::process::id(),
                     "RTLD_DEFAULT returned our own function, skipping"
                 );
@@ -191,7 +191,7 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules"
             );
@@ -208,7 +208,7 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
                                 let path = &line[path_start + 1..];
                                 if path.starts_with('/') && !paths.contains(&path.to_string()) {
                                     paths.push(path.to_string());
-                                    info!(
+                                    debug!(
                                         pid = std::process::id(),
                                         "Found UCX library in memory map: {}", path
                                     );
@@ -231,7 +231,7 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_put_nbx in {}: {:?}", lib_path, ptr
                         );
@@ -252,7 +252,7 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_put_nbx in {}: {:?}", lib_name, ptr
                         );
@@ -280,7 +280,7 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
         let symbol_name = CString::new("ucp_ep_flush_nbx").unwrap();
 
         // First try RTLD_NEXT - this should work for library interposition
-        info!(
+        debug!(
             pid = std::process::id(),
             "looking up symbol with RTLD_NEXT: ucp_ep_flush_nbx"
         );
@@ -288,12 +288,12 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
 
         // Check if we got our own function (infinite recursion trap)
         let our_function_addr = ucp_ep_flush_nbx as *const () as *mut c_void;
-        info!(
+        debug!(
             pid = std::process::id(),
             "Our function address: {:?}, RTLD_NEXT returned: {:?}", our_function_addr, ptr
         );
         if ptr == our_function_addr {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT returned our own function, skipping"
             );
@@ -301,16 +301,16 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_NEXT failed, trying RTLD_DEFAULT"
             );
             ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-            info!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
+            debug!(pid = std::process::id(), "RTLD_DEFAULT returned: {:?}", ptr);
 
             // Check again for our own function
             if ptr == our_function_addr {
-                info!(
+                debug!(
                     pid = std::process::id(),
                     "RTLD_DEFAULT returned our own function, skipping"
                 );
@@ -319,7 +319,7 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
         }
 
         if ptr.is_null() {
-            info!(
+            debug!(
                 pid = std::process::id(),
                 "RTLD_DEFAULT failed, trying to find UCX libraries in loaded modules"
             );
@@ -336,7 +336,7 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
                                 let path = &line[path_start + 1..];
                                 if path.starts_with('/') && !paths.contains(&path.to_string()) {
                                     paths.push(path.to_string());
-                                    info!(
+                                    debug!(
                                         pid = std::process::id(),
                                         "Found UCX library in memory map: {}", path
                                     );
@@ -359,7 +359,7 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_ep_flush_nbx in {}: {:?}", lib_path, ptr
                         );
@@ -380,7 +380,7 @@ pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
                 if !handle.is_null() {
                     ptr = libc::dlsym(handle, symbol_name.as_ptr());
                     if !ptr.is_null() && ptr != our_function_addr {
-                        info!(
+                        debug!(
                             pid = std::process::id(),
                             "Found ucp_ep_flush_nbx in {}: {:?}", lib_name, ptr
                         );
@@ -504,7 +504,7 @@ fn get_real_function_ptr(
 fn log_debug_info_if_enabled(_fn_name: &str, call_num: u32) {
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
         let state = get_current_state();
-        info!(
+        debug!(
             pid = std::process::id(),
             "Fault state: enabled={}, strategy={}, pattern={:?}, error_codes={:?}",
             state.enabled,
@@ -601,7 +601,7 @@ pub extern "C" fn ucp_get_nbx(
 
     // Function-specific logging
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
-        info!(
+        trace!(
             pid = std::process::id(),
             "ucp_get_nbx called #{} - ep: {:?}, buffer: {:?}, count: {}, remote_addr: 0x{:x}, rkey: {:?}, param: {:?}",
             call_num, ep, buffer, count, remote_addr, rkey, param
@@ -631,9 +631,9 @@ pub extern "C" fn ucp_get_nbx(
             UcpRequestParamT,
         ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
 
-        info!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_get_nbx function");
+        trace!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_get_nbx function");
         let result = real_fn(ep, buffer, count, remote_addr, rkey, param);
-        info!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_get_nbx returned");
+        trace!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_get_nbx returned");
 
         result
     } else {
@@ -680,7 +680,7 @@ pub extern "C" fn ucp_put_nbx(
 
     // Function-specific logging
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
-        info!(
+        trace!(
             pid = std::process::id(),
             "ucp_put_nbx called #{} - ep: {:?}, buffer: {:?}, count: {}, remote_addr: 0x{:x}, rkey: {:?}, param: {:?}",
             call_num, ep, buffer, count, remote_addr, rkey, param
@@ -710,9 +710,9 @@ pub extern "C" fn ucp_put_nbx(
             UcpRequestParamT,
         ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
 
-        info!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_put_nbx function");
+        trace!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_put_nbx function");
         let result = real_fn(ep, buffer, count, remote_addr, rkey, param);
-        info!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_put_nbx returned");
+        trace!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_put_nbx returned");
 
         result
     } else {
@@ -752,9 +752,12 @@ pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsSt
 
     // Function-specific logging
     if DEBUG_ENABLED.load(Ordering::Relaxed) || call_num < 5 {
-        info!(
+        trace!(
             pid = std::process::id(),
-            "ucp_ep_flush_nbx called #{} - ep: {:?}, param: {:?}", call_num, ep, param
+            "ucp_ep_flush_nbx called #{} - ep: {:?}, param: {:?}",
+            call_num,
+            ep,
+            param
         );
         log_debug_info_if_enabled(FN_NAME, call_num);
     }
@@ -779,9 +782,9 @@ pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsSt
         let real_fn: extern "C" fn(UcpEpH, UcpRequestParamT) -> UcsStatusPtr =
             unsafe { std::mem::transmute(real_fn_ptr) };
 
-        info!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_ep_flush_nbx function");
+        trace!(pid = std::process::id(), call_num, address = ?real_fn_ptr, "calling real ucp_ep_flush_nbx function");
         let result = real_fn(ep, param);
-        info!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_ep_flush_nbx returned");
+        trace!(pid = std::process::id(), call_num, result = ?result, result_int = result as isize, "real ucp_ep_flush_nbx returned");
 
         result
     } else {
