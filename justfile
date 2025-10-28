@@ -59,6 +59,10 @@ lint:
 # Check everything
 check: fmt lint build
 
+# Bump version (patch, minor, or major)
+bump-version level="patch":
+    cargo set-version --bump {{level}}
+
 # Show help for signal-based fault control
 help-signals:
     @echo "UCX Fault Injector Signal Controls:"
