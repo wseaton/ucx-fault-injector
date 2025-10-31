@@ -2,6 +2,7 @@ use libc::{c_void, size_t};
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, error, trace, warn};
 
+use crate::recorder::{CallParams, FunctionType};
 use crate::state::{is_in_intercept, set_in_intercept, DEBUG_ENABLED, LOCAL_STATE};
 use crate::subscriber::get_current_state;
 use crate::ucx::{ucs_status_to_ptr, UcpEpH, UcpRequestParamT, UcpRkeyH, UcsStatus, UcsStatusPtr};
@@ -431,19 +432,22 @@ fn update_call_stats(calls_counter: &AtomicU64) {
     calls_counter.fetch_add(1, Ordering::Relaxed);
 }
 
-// handle fault injection logic and recording
+// handle fault injection logic and recording with full parameter capture
 fn handle_fault_injection(
     fn_name: &str,
     call_num: u32,
     faults_counter: &AtomicU64,
+    params: &CallParams,
 ) -> Option<UcsStatusPtr> {
     if let Some(error_code) = should_inject_fault_for_function(fn_name) {
-        // Record the fault injection decision in local state
+        // record the fault injection decision with full parameters
         debug!(
             pid = std::process::id(),
             "recording fault injection call #{}: error_code={}", call_num, error_code
         );
-        LOCAL_STATE.call_recorder.record_call(true, error_code);
+        LOCAL_STATE
+            .call_recorder
+            .record_call_with_params(true, error_code, params);
         LOCAL_STATE.faults_injected.fetch_add(1, Ordering::Relaxed);
         faults_counter.fetch_add(1, Ordering::Relaxed);
         LOCAL_STATE.calls_since_fault.store(0, Ordering::Relaxed);
@@ -462,12 +466,14 @@ fn handle_fault_injection(
         );
         Some(ucs_status_to_ptr(error_code))
     } else {
-        // Record the successful call (no fault injected) in local state
+        // record the successful call with full parameters
         debug!(
             pid = std::process::id(),
             "recording successful call #{}", call_num
         );
-        LOCAL_STATE.call_recorder.record_call(false, 0); // 0 is placeholder, not used for success
+        LOCAL_STATE
+            .call_recorder
+            .record_call_with_params(false, 0, params);
         LOCAL_STATE
             .calls_since_fault
             .fetch_add(1, Ordering::Relaxed);
@@ -610,8 +616,15 @@ pub extern "C" fn ucp_get_nbx(
     }
 
     // Check for fault injection
+    let params = CallParams {
+        function_type: FunctionType::UcpGetNbx,
+        transfer_size: count as u64,
+        remote_addr,
+        endpoint: ep as u64,
+        rkey: rkey as u64,
+    };
     if let Some(fault_result) =
-        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_get_nbx_faults)
+        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_get_nbx_faults, &params)
     {
         set_in_intercept(false);
         return fault_result;
@@ -689,8 +702,15 @@ pub extern "C" fn ucp_put_nbx(
     }
 
     // Check for fault injection
+    let params = CallParams {
+        function_type: FunctionType::UcpPutNbx,
+        transfer_size: count as u64,
+        remote_addr,
+        endpoint: ep as u64,
+        rkey: rkey as u64,
+    };
     if let Some(fault_result) =
-        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_put_nbx_faults)
+        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_put_nbx_faults, &params)
     {
         set_in_intercept(false);
         return fault_result;
@@ -762,10 +782,20 @@ pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsSt
         log_debug_info_if_enabled(FN_NAME, call_num);
     }
 
-    // Check for fault injection
-    if let Some(fault_result) =
-        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_ep_flush_nbx_faults)
-    {
+    // Check for fault injection (flush has no transfer size/remote addr/rkey)
+    let params = CallParams {
+        function_type: FunctionType::UcpEpFlushNbx,
+        transfer_size: 0,
+        remote_addr: 0,
+        endpoint: ep as u64,
+        rkey: 0,
+    };
+    if let Some(fault_result) = handle_fault_injection(
+        FN_NAME,
+        call_num,
+        &LOCAL_STATE.ucp_ep_flush_nbx_faults,
+        &params,
+    ) {
         set_in_intercept(false);
         return fault_result;
     }

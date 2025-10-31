@@ -1,4 +1,35 @@
 use crate::ucx::UcsStatus;
+use std::str::FromStr;
+
+/// granularity at which fault injection decisions are made
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultGranularity {
+    /// inject faults on a per-call basis (each individual function call)
+    PerCall,
+    /// inject faults on a per-request basis (group calls with same arguments)
+    PerRequest,
+}
+
+impl FaultGranularity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FaultGranularity::PerCall => "per-call",
+            FaultGranularity::PerRequest => "per-request",
+        }
+    }
+}
+
+impl FromStr for FaultGranularity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "per-call" | "percall" | "call" => Ok(FaultGranularity::PerCall),
+            "per-request" | "perrequest" | "request" => Ok(FaultGranularity::PerRequest),
+            _ => Err(format!("invalid granularity: {}", s)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectionMethod {

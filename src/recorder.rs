@@ -7,7 +7,45 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Maximum number of call records in the ring buffer
 pub const MAX_CALL_RECORDS: usize = 8192;
 
-/// A single recorded call with its fault injection decision
+/// Function type enumeration
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionType {
+    UcpGetNbx = 0,
+    UcpPutNbx = 1,
+    UcpEpFlushNbx = 2,
+}
+
+impl FunctionType {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::UcpGetNbx),
+            1 => Some(Self::UcpPutNbx),
+            2 => Some(Self::UcpEpFlushNbx),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UcpGetNbx => "ucp_get_nbx",
+            Self::UcpPutNbx => "ucp_put_nbx",
+            Self::UcpEpFlushNbx => "ucp_ep_flush_nbx",
+        }
+    }
+}
+
+/// parameters for a UCX function call
+#[derive(Debug, Clone, Copy)]
+pub struct CallParams {
+    pub function_type: FunctionType,
+    pub transfer_size: u64,
+    pub remote_addr: u64,
+    pub endpoint: u64,
+    pub rkey: u64,
+}
+
+/// A single recorded call with its fault injection decision and parameters
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CallRecord {
@@ -21,10 +59,28 @@ pub struct CallRecord {
     pub error_code: i32,
     /// Function name hash (for future extensibility)
     pub function_hash: u32,
+
+    // function parameters for detailed analysis
+    /// Function type (0=get, 1=put, 2=flush)
+    pub function_type: u8,
+    /// Transfer size in bytes (0 for flush operations)
+    pub transfer_size: u64,
+    /// Remote memory address (0 for flush operations)
+    pub remote_addr: u64,
+    /// Endpoint handle (cast to u64)
+    pub endpoint: u64,
+    /// Remote key handle (cast to u64, 0 for flush operations)
+    pub rkey: u64,
 }
 
 impl CallRecord {
-    pub fn new(sequence: u64, fault_injected: bool, error_code: UcsStatus) -> Self {
+    /// Create a new call record with function parameters
+    pub fn new_with_params(
+        sequence: u64,
+        fault_injected: bool,
+        error_code: UcsStatus,
+        params: &CallParams,
+    ) -> Self {
         let timestamp_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -35,8 +91,25 @@ impl CallRecord {
             timestamp_us,
             fault_injected,
             error_code: if fault_injected { error_code } else { 0 },
-            function_hash: Self::hash_function_name("ucp_get_nbx"),
+            function_hash: Self::hash_function_name(params.function_type.as_str()),
+            function_type: params.function_type as u8,
+            transfer_size: params.transfer_size,
+            remote_addr: params.remote_addr,
+            endpoint: params.endpoint,
+            rkey: params.rkey,
         }
+    }
+
+    /// Create a new call record (legacy, for backwards compatibility)
+    pub fn new(sequence: u64, fault_injected: bool, error_code: UcsStatus) -> Self {
+        let params = CallParams {
+            function_type: FunctionType::UcpGetNbx,
+            transfer_size: 0,
+            remote_addr: 0,
+            endpoint: 0,
+            rkey: 0,
+        };
+        Self::new_with_params(sequence, fault_injected, error_code, &params)
     }
 
     /// Generate a hash for function names for future extensibility
@@ -99,6 +172,11 @@ impl CallRecordBuffer {
             fault_injected: false,
             error_code: 0,
             function_hash: 0,
+            function_type: 0,
+            transfer_size: 0,
+            remote_addr: 0,
+            endpoint: 0,
+            rkey: 0,
         };
 
         Self {
@@ -111,14 +189,19 @@ impl CallRecordBuffer {
         }
     }
 
-    /// Record a new call (thread-safe, lock-free)
-    pub fn record_call(&self, fault_injected: bool, error_code: UcsStatus) {
+    /// Record a new call with full parameters (thread-safe, lock-free)
+    pub fn record_call_with_params(
+        &self,
+        fault_injected: bool,
+        error_code: UcsStatus,
+        params: &CallParams,
+    ) {
         if self.recording_enabled.load(Ordering::Relaxed) == 0 {
             return;
         }
 
         let sequence = self.total_records.fetch_add(1, Ordering::Relaxed);
-        let record = CallRecord::new(sequence, fault_injected, error_code);
+        let record = CallRecord::new_with_params(sequence, fault_injected, error_code, params);
 
         // get write position and advance atomically
         let write_pos = self.write_index.fetch_add(1, Ordering::Relaxed) % MAX_CALL_RECORDS as u64;
@@ -128,6 +211,18 @@ impl CallRecordBuffer {
             let records_array = &mut *self.records.get();
             records_array[write_pos as usize] = record;
         }
+    }
+
+    /// Record a new call (legacy, for backwards compatibility)
+    pub fn record_call(&self, fault_injected: bool, error_code: UcsStatus) {
+        let params = CallParams {
+            function_type: FunctionType::UcpGetNbx,
+            transfer_size: 0,
+            remote_addr: 0,
+            endpoint: 0,
+            rkey: 0,
+        };
+        self.record_call_with_params(fault_injected, error_code, &params);
     }
 
     /// Enable or disable recording
@@ -149,6 +244,11 @@ impl CallRecordBuffer {
             fault_injected: false,
             error_code: 0,
             function_hash: 0,
+            function_type: 0,
+            transfer_size: 0,
+            remote_addr: 0,
+            endpoint: 0,
+            rkey: 0,
         };
 
         self.write_index.store(0, Ordering::Relaxed);
@@ -282,16 +382,28 @@ pub struct SerializableCallRecord {
     pub fault_injected: bool,
     pub error_code: i32,
     pub function_name: String,
+    pub transfer_size: u64,
+    pub remote_addr: String,
+    pub endpoint: String,
+    pub rkey: String,
 }
 
 impl From<CallRecord> for SerializableCallRecord {
     fn from(record: CallRecord) -> Self {
+        let function_name = FunctionType::from_u8(record.function_type)
+            .map(|ft| ft.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
         Self {
             sequence: record.sequence,
             timestamp_us: record.timestamp_us,
             fault_injected: record.fault_injected,
             error_code: record.error_code,
-            function_name: "ucp_get_nbx".to_string(), // for now, only this function
+            function_name,
+            transfer_size: record.transfer_size,
+            remote_addr: format!("0x{:x}", record.remote_addr),
+            endpoint: format!("0x{:x}", record.endpoint),
+            rkey: format!("0x{:x}", record.rkey),
         }
     }
 }
@@ -395,6 +507,11 @@ impl CallRecordBuffer {
                 fault_injected: false,
                 error_code: 0,
                 function_hash: 0,
+                function_type: 0,
+                transfer_size: 0,
+                remote_addr: 0,
+                endpoint: 0,
+                rkey: 0,
             };
             *records_array = [EMPTY_RECORD; MAX_CALL_RECORDS];
 

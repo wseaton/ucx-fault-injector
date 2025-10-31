@@ -34,6 +34,19 @@ pub fn get_current_state() -> State {
         total_recorded_calls: total_calls,
         recorded_pattern_length: pattern_length,
         hook_config: hook_config_state,
+
+        // aggregate statistics
+        total_calls: LOCAL_STATE.total_calls.load(Ordering::Relaxed),
+        faults_injected: LOCAL_STATE.faults_injected.load(Ordering::Relaxed),
+        calls_since_fault: LOCAL_STATE.calls_since_fault.load(Ordering::Relaxed),
+
+        // per-function statistics
+        ucp_get_nbx_calls: LOCAL_STATE.ucp_get_nbx_calls.load(Ordering::Relaxed),
+        ucp_get_nbx_faults: LOCAL_STATE.ucp_get_nbx_faults.load(Ordering::Relaxed),
+        ucp_put_nbx_calls: LOCAL_STATE.ucp_put_nbx_calls.load(Ordering::Relaxed),
+        ucp_put_nbx_faults: LOCAL_STATE.ucp_put_nbx_faults.load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_calls: LOCAL_STATE.ucp_ep_flush_nbx_calls.load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_faults: LOCAL_STATE.ucp_ep_flush_nbx_faults.load(Ordering::Relaxed),
     }
 }
 

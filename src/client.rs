@@ -1,4 +1,7 @@
+#![allow(dead_code)]
+
 use clap::{Parser, Subcommand};
+use comfy_table::{Cell, Table};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
@@ -34,14 +37,45 @@ impl IpcBackend {
     }
 }
 
-// Response structure from server
+// Response structure from server (mirrors commands::Response)
 #[derive(Deserialize, Debug)]
 struct Response {
     status: String,
     message: String,
+    state: Option<State>,
+    recording_data: Option<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Debug)]
+struct State {
+    enabled: bool,
+    probability: u32,
+    strategy: String,
+    pattern: Option<String>,
+    error_codes: Vec<i32>,
+    recording_enabled: bool,
+    total_recorded_calls: u64,
+    recorded_pattern_length: usize,
+    hook_config: HookConfig,
+    total_calls: u64,
+    faults_injected: u64,
+    calls_since_fault: u64,
+    ucp_get_nbx_calls: u64,
+    ucp_get_nbx_faults: u64,
+    ucp_put_nbx_calls: u64,
+    ucp_put_nbx_faults: u64,
+    ucp_ep_flush_nbx_calls: u64,
+    ucp_ep_flush_nbx_faults: u64,
+}
+
+#[derive(Deserialize, Debug)]
+struct HookConfig {
+    ucp_get_nbx_enabled: bool,
+    ucp_put_nbx_enabled: bool,
+    ucp_ep_flush_nbx_enabled: bool,
+}
+
+#[derive(Serialize, Clone)]
 struct Command {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,6 +145,15 @@ enum Commands {
     },
     /// Replay recorded fault pattern
     Replay,
+    /// Show aggregate statistics across all injected processes
+    AggregateStats {
+        /// Show detailed per-function breakdown
+        #[arg(long)]
+        detailed: bool,
+        /// Group transfers by size buckets
+        #[arg(long)]
+        group_by_size: bool,
+    },
 }
 
 fn send_command_file(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -168,10 +211,8 @@ fn is_process_alive(pid: u32) -> bool {
 
 fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     use glob::glob;
-    use std::io::{BufRead, BufReader, BufWriter, Write};
-    use std::os::unix::net::UnixStream;
 
-    // Discover all socket files
+    // discover all socket files
     let socket_pattern = "/tmp/ucx-fault-*.sock";
     let all_sockets: Vec<_> = glob(socket_pattern)?.filter_map(Result::ok).collect();
 
@@ -213,82 +254,115 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
 
     info!(count = sockets.len(), "found active injected process(es)");
 
+    // run async broadcast in blocking context
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async_broadcast_command(sockets, command))
+}
+
+async fn async_broadcast_command(
+    sockets: Vec<std::path::PathBuf>,
+    command: Command,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // spawn parallel tasks for each socket
+    let tasks: Vec<_> = sockets
+        .into_iter()
+        .map(|socket_path| {
+            let command = command.clone();
+            tokio::spawn(async move {
+                // extract PID from socket path
+                let pid = socket_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|s| s.strip_prefix("ucx-fault-"))
+                    .and_then(|s| s.strip_suffix(".sock"))
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                // connect to socket with timeout
+                let stream = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    UnixStream::connect(&socket_path),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!(pid, error = %e, "failed to connect");
+                        return Err(format!("connect failed: {}", e));
+                    }
+                    Err(_) => {
+                        warn!(pid, "connection timeout");
+                        return Err("connection timeout".to_string());
+                    }
+                };
+
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+
+                // send command with newline delimiter
+                let command_json = match serde_json::to_string(&command) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        error!(pid, error = %e, "failed to serialize command");
+                        return Err(format!("serialization failed: {}", e));
+                    }
+                };
+
+                if let Err(e) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    writer.write_all(format!("{}\n", command_json).as_bytes()),
+                )
+                .await
+                {
+                    error!(pid, error = %e, "failed to send command");
+                    return Err(format!("write failed: {}", e));
+                }
+
+                if let Err(e) = writer.flush().await {
+                    error!(pid, error = %e, "failed to flush command");
+                    return Err(format!("flush failed: {}", e));
+                }
+
+                // read line-delimited JSON response with timeout
+                let mut response_line = String::new();
+                if let Err(e) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    reader.read_line(&mut response_line),
+                )
+                .await
+                {
+                    error!(pid, error = %e, "failed to read response line");
+                    return Err(format!("read timeout: {}", e));
+                }
+
+                let response: Response = match serde_json::from_str(&response_line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!(pid, error = %e, line = %response_line.trim(), "failed to parse response");
+                        return Err(format!("parse failed: {}", e));
+                    }
+                };
+
+                info!(pid, status = %response.status, message = %response.message, "command processed");
+                Ok(())
+            })
+        })
+        .collect();
+
+    // wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
     let mut success_count = 0;
     let mut error_count = 0;
 
-    for socket_path in sockets {
-        // Extract PID from socket path
-        let pid = socket_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|s| s.strip_prefix("ucx-fault-"))
-            .and_then(|s| s.strip_suffix(".sock"))
-            .unwrap_or("unknown");
-
-        // Connect to socket
-        let stream = match UnixStream::connect(&socket_path) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(pid, error = %e, "failed to connect");
-                error_count += 1;
-                continue;
-            }
-        };
-
-        // set read/write timeouts to prevent hanging on unresponsive processes
-        let timeout = std::time::Duration::from_secs(5);
-        if let Err(e) = stream.set_read_timeout(Some(timeout)) {
-            warn!(pid, error = %e, "failed to set read timeout");
-            error_count += 1;
-            continue;
+    for result in results {
+        match result {
+            Ok(Ok(())) => success_count += 1,
+            Ok(Err(_)) | Err(_) => error_count += 1,
         }
-        if let Err(e) = stream.set_write_timeout(Some(timeout)) {
-            warn!(pid, error = %e, "failed to set write timeout");
-            error_count += 1;
-            continue;
-        }
-
-        let mut writer = BufWriter::new(&stream);
-        let mut reader = BufReader::new(&stream);
-
-        // Send command with newline delimiter
-        if let Err(e) = serde_json::to_writer(&mut writer, &command) {
-            error!(pid, error = %e, "failed to send command");
-            error_count += 1;
-            continue;
-        }
-
-        if let Err(e) = writeln!(writer) {
-            error!(pid, error = %e, "failed to write newline delimiter");
-            error_count += 1;
-            continue;
-        }
-
-        if let Err(e) = writer.flush() {
-            error!(pid, error = %e, "failed to flush command");
-            error_count += 1;
-            continue;
-        }
-
-        // Read line-delimited JSON response
-        let mut response_line = String::new();
-        if let Err(e) = reader.read_line(&mut response_line) {
-            error!(pid, error = %e, "failed to read response line");
-            error_count += 1;
-            continue;
-        }
-
-        let response: Response = match serde_json::from_str(&response_line) {
-            Ok(r) => r,
-            Err(e) => {
-                error!(pid, error = %e, line = %response_line.trim(), "failed to parse response");
-                error_count += 1;
-                continue;
-            }
-        };
-
-        info!(pid, status = %response.status, message = %response.message, "command processed");
-        success_count += 1;
     }
 
     if error_count > 0 {
@@ -303,6 +377,269 @@ fn send_command_socket(command: Command) -> Result<(), Box<dyn std::error::Error
     }
 }
 
+async fn async_collect_stats(
+    sockets: Vec<(u32, std::path::PathBuf)>,
+) -> Result<std::collections::HashMap<u32, State>, Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // spawn parallel tasks for each socket
+    let tasks: Vec<_> = sockets
+        .into_iter()
+        .map(|(pid, socket_path)| {
+            tokio::spawn(async move {
+                // connect to socket with timeout
+                let stream = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    UnixStream::connect(&socket_path),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!(pid, error = %e, "failed to connect, skipping");
+                        return None;
+                    }
+                    Err(_) => {
+                        warn!(pid, "connection timeout, skipping");
+                        return None;
+                    }
+                };
+
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+
+                // send status command
+                let command = Command {
+                    command: "status".to_string(),
+                    scenario: None,
+                    value: None,
+                    pattern: None,
+                    recording_enabled: None,
+                    export_format: None,
+                };
+
+                let command_json = match serde_json::to_string(&command) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        warn!(pid, error = %e, "failed to serialize command");
+                        return None;
+                    }
+                };
+
+                if let Err(e) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    writer.write_all(format!("{}\n", command_json).as_bytes()),
+                )
+                .await
+                {
+                    warn!(pid, error = %e, "failed to send command");
+                    return None;
+                }
+
+                if let Err(e) = writer.flush().await {
+                    warn!(pid, error = %e, "failed to flush command");
+                    return None;
+                }
+
+                // read response with timeout
+                let mut response_line = String::new();
+                if let Err(e) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    reader.read_line(&mut response_line),
+                )
+                .await
+                {
+                    warn!(pid, error = %e, "failed to read response, skipping");
+                    return None;
+                }
+
+                let response: Response = match serde_json::from_str(&response_line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(pid, error = %e, "failed to parse response, skipping");
+                        return None;
+                    }
+                };
+
+                response.state.map(|state| (pid, state))
+            })
+        })
+        .collect();
+
+    // wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    let mut process_stats = std::collections::HashMap::new();
+    for result in results {
+        if let Ok(Some((pid, state))) = result {
+            process_stats.insert(pid, state);
+        }
+    }
+
+    Ok(process_stats)
+}
+
+// aggregate statistics collection and display
+fn aggregate_stats(detailed: bool, group_by_size: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use glob::glob;
+
+    // discover all socket files
+    let socket_pattern = "/tmp/ucx-fault-*.sock";
+    let all_sockets: Vec<_> = glob(socket_pattern)?.filter_map(Result::ok).collect();
+
+    // filter out stale sockets
+    let mut sockets = Vec::new();
+    for socket_path in all_sockets {
+        let pid_str = socket_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.strip_prefix("ucx-fault-"))
+            .and_then(|s| s.strip_suffix(".sock"));
+
+        if let Some(pid_str) = pid_str {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                if is_process_alive(pid) {
+                    sockets.push((pid, socket_path));
+                }
+            }
+        }
+    }
+
+    if sockets.is_empty() {
+        error!(socket_pattern, "no UCX fault injector processes found");
+        return Err("No target processes found".into());
+    }
+
+    info!("");
+    info!("═══ UCX FAULT INJECTOR: AGGREGATE STATISTICS ═══");
+    info!("");
+
+    // collect stats from all processes in parallel
+    let runtime = tokio::runtime::Runtime::new()?;
+    let process_stats = runtime.block_on(async_collect_stats(sockets))?;
+
+    if process_stats.is_empty() {
+        error!("no statistics collected from any process");
+        return Err("Failed to collect stats".into());
+    }
+
+    // aggregate totals
+    let mut total_calls = 0u64;
+    let mut total_faults = 0u64;
+    let mut total_get_calls = 0u64;
+    let mut total_get_faults = 0u64;
+    let mut total_put_calls = 0u64;
+    let mut total_put_faults = 0u64;
+    let mut total_flush_calls = 0u64;
+    let mut total_flush_faults = 0u64;
+
+    for state in process_stats.values() {
+        total_calls += state.total_calls;
+        total_faults += state.faults_injected;
+        total_get_calls += state.ucp_get_nbx_calls;
+        total_get_faults += state.ucp_get_nbx_faults;
+        total_put_calls += state.ucp_put_nbx_calls;
+        total_put_faults += state.ucp_put_nbx_faults;
+        total_flush_calls += state.ucp_ep_flush_nbx_calls;
+        total_flush_faults += state.ucp_ep_flush_nbx_faults;
+    }
+
+    let global_fault_rate = if total_calls > 0 {
+        (total_faults as f64 / total_calls as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // display session overview
+    info!("SESSION OVERVIEW");
+    info!("Total Processes:        {}", process_stats.len());
+    info!("Total Calls (all PIDs): {}", total_calls);
+    info!(
+        "Total Faults Injected:  {} ({:.2}%)",
+        total_faults, global_fault_rate
+    );
+    info!("");
+
+    // per-process breakdown
+    info!("PER-PROCESS BREAKDOWN");
+    let mut process_table = Table::new();
+    process_table.set_header(vec![
+        "PID",
+        "Total Calls",
+        "Faults",
+        "Fault Rate",
+        "Recording",
+    ]);
+
+    let mut pids: Vec<_> = process_stats.keys().collect();
+    pids.sort();
+
+    for pid in pids {
+        let state = &process_stats[pid];
+        let fault_rate = if state.total_calls > 0 {
+            (state.faults_injected as f64 / state.total_calls as f64) * 100.0
+        } else {
+            0.0
+        };
+        let recording_status = if state.recording_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+
+        process_table.add_row(vec![
+            Cell::new(pid),
+            Cell::new(state.total_calls),
+            Cell::new(state.faults_injected),
+            Cell::new(format!("{:.2}%", fault_rate)),
+            Cell::new(recording_status),
+        ]);
+    }
+    info!("\n{}", process_table);
+
+    // function-level statistics
+    if detailed {
+        info!("FUNCTION HOOK STATISTICS");
+        let mut func_table = Table::new();
+        func_table.set_header(vec![
+            "Function",
+            "Total Calls",
+            "% of Total",
+            "Faults",
+            "Fault Rate",
+        ]);
+
+        let functions = [
+            ("ucp_get_nbx", total_get_calls, total_get_faults),
+            ("ucp_put_nbx", total_put_calls, total_put_faults),
+            ("ucp_ep_flush_nbx", total_flush_calls, total_flush_faults),
+        ];
+
+        for (name, calls, faults) in &functions {
+            if *calls > 0 {
+                let pct_of_total = (*calls as f64 / total_calls as f64) * 100.0;
+                let fault_rate = (*faults as f64 / *calls as f64) * 100.0;
+                func_table.add_row(vec![
+                    Cell::new(name),
+                    Cell::new(calls),
+                    Cell::new(format!("{:.1}%", pct_of_total)),
+                    Cell::new(faults),
+                    Cell::new(format!("{:.2}%", fault_rate)),
+                ]);
+            }
+        }
+        info!("\n{}", func_table);
+    }
+
+    if group_by_size {
+        info!("(Parameter grouping analysis coming soon...)");
+        info!("");
+    }
+
+    Ok(())
+}
+
 fn main() {
     // initialize tracing
     tracing_subscriber::fmt()
@@ -312,6 +649,19 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    // handle aggregate-stats specially (doesn't broadcast a command)
+    if let Commands::AggregateStats {
+        detailed,
+        group_by_size,
+    } = cli.command
+    {
+        if let Err(e) = aggregate_stats(detailed, group_by_size) {
+            error!(error = %e, "failed to collect aggregate statistics");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let command = match cli.command {
         Commands::Toggle => Command {
@@ -402,6 +752,7 @@ fn main() {
             recording_enabled: None,
             export_format: None,
         },
+        Commands::AggregateStats { .. } => unreachable!("handled above"),
     };
 
     // Determine IPC backend and send command

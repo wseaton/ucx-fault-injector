@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod commands;
 pub mod init;
 pub mod intercept;
@@ -14,7 +16,9 @@ mod tests;
 pub use commands::{Command, Response, State};
 pub use init::init_fault_injector;
 pub use intercept::ucp_get_nbx;
-pub use recorder::{CallRecord, CallRecordBuffer, RecordingSummary, SerializableCallRecord};
+pub use recorder::{
+    CallParams, CallRecord, CallRecordBuffer, RecordingSummary, SerializableCallRecord,
+};
 pub use strategy::FaultStrategy;
 pub use subscriber::{get_current_state, handle_command};
 pub use ucx::*;
