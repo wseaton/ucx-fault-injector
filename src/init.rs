@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 use crate::intercept::{init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
 use crate::subscriber::{get_current_state, start_file_watcher, start_socket_server};
+use crate::version_info;
 
 // IPC backend selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +129,7 @@ pub fn init_fault_injector() {
     let function_intercept_already_initialized = is_already_initialized();
 
     if !function_intercept_already_initialized {
-        info!("UCX fault injector loaded (Rust version)");
+        info!(version = %version_info(), "UCX fault injector loaded");
         info!(pid = current_pid, "initialization starting");
 
         // Determine which IPC backend to use

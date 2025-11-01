@@ -9,6 +9,19 @@ pub mod strategy;
 pub mod subscriber;
 pub mod ucx;
 
+// version info from build-time git metadata (similar to setuptools_scm)
+pub fn version_info() -> String {
+    let cargo_version = env!("CARGO_PKG_VERSION");
+    let git_sha = env!("VERGEN_GIT_SHA");
+    let git_dirty = env!("VERGEN_GIT_DIRTY");
+
+    if git_dirty == "true" {
+        format!("{}-dev+{}.dirty", cargo_version, &git_sha[..7])
+    } else {
+        format!("{}-dev+{}", cargo_version, &git_sha[..7])
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

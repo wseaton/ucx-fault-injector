@@ -5,6 +5,19 @@ use comfy_table::{Cell, Table};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+// version info from build-time git metadata (similar to setuptools_scm)
+fn version_info() -> String {
+    let cargo_version = env!("CARGO_PKG_VERSION");
+    let git_sha = env!("VERGEN_GIT_SHA");
+    let git_dirty = env!("VERGEN_GIT_DIRTY");
+
+    if git_dirty == "true" {
+        format!("{}-dev+{}.dirty", cargo_version, &git_sha[..7])
+    } else {
+        format!("{}-dev+{}", cargo_version, &git_sha[..7])
+    }
+}
+
 fn validate_probability(s: &str) -> Result<f64, String> {
     let value: f64 = s
         .parse()
@@ -647,6 +660,8 @@ fn main() {
         .with_level(true)
         .compact()
         .init();
+
+    info!(version = %version_info(), "ucx-fault-client starting");
 
     let cli = Cli::parse();
 
