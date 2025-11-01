@@ -551,6 +551,45 @@ pub fn should_inject_fault() -> Option<UcsStatus> {
     strategy.should_inject()
 }
 
+// thread-local RNG for lock-free random decisions
+thread_local! {
+    static THREAD_RNG: std::cell::Cell<u64> = std::cell::Cell::new({
+        use std::time::SystemTime;
+        let tid = unsafe { libc::pthread_self() as u64 };
+        let time = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        tid.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(time)
+    });
+}
+
+// fast, lock-free random number generator (xorshift)
+#[inline(always)]
+fn fast_random() -> u32 {
+    THREAD_RNG.with(|rng| {
+        let mut x = rng.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        rng.set(x);
+        (x % 100) as u32
+    })
+}
+
+// lock-free random fault injection (hot path - no mutex!)
+#[inline(always)]
+fn should_inject_lockfree_random() -> Option<UcsStatus> {
+    let probability = LOCAL_STATE.random_probability.load(Ordering::Relaxed);
+    if probability == 0 {
+        return None;
+    }
+
+    if fast_random() < probability {
+        // use default error code for lock-free path
+        Some(crate::ucx::UCS_ERR_IO_ERROR)
+    } else {
+        None
+    }
+}
+
 // optimized helper function that takes the hook flag directly (no string matching!)
 #[inline(always)]
 pub fn should_inject_fault_for_hook(hook_enabled: &AtomicBool) -> Option<UcsStatus> {
@@ -564,7 +603,12 @@ pub fn should_inject_fault_for_hook(hook_enabled: &AtomicBool) -> Option<UcsStat
         return None;
     }
 
-    // slow path: only lock strategy mutex if we're actually injecting
+    // ultra-fast path: lock-free random strategy (most common case)
+    if LOCAL_STATE.use_lockfree_random.load(Ordering::Relaxed) {
+        return should_inject_lockfree_random();
+    }
+
+    // slow path: pattern/replay strategies require mutex lock
     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
     strategy.should_inject()
 }
@@ -592,12 +636,25 @@ pub extern "C" fn ucp_get_nbx(
 ) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_get_nbx";
 
-    // FAST PATH: if fault injection is disabled globally, immediately call real function
-    // this is a single atomic load with relaxed ordering - minimal overhead
+    // ULTRA-FAST PATH: single atomic check, no thread-local work, no reentrancy guard
+    // bypasses everything when fault injection is globally disabled
     if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
-        let real_fn_ptr =
-            get_real_function_ptr(&REAL_UCP_GET_NBX, try_find_real_ucp_get_nbx, FN_NAME);
+        let real_fn_ptr = REAL_UCP_GET_NBX.load(Ordering::Relaxed);
         if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(
+                UcpEpH,
+                *mut c_void,
+                size_t,
+                u64,
+                UcpRkeyH,
+                UcpRequestParamT,
+            ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, buffer, count, remote_addr, rkey, param);
+        }
+        // fallback: lazy init if not yet initialized
+        let real_fn_ptr = try_find_real_ucp_get_nbx();
+        if !real_fn_ptr.is_null() {
+            REAL_UCP_GET_NBX.store(real_fn_ptr, Ordering::Relaxed);
             let real_fn: extern "C" fn(
                 UcpEpH,
                 *mut c_void,
@@ -610,7 +667,7 @@ pub extern "C" fn ucp_get_nbx(
         }
     }
 
-    // Check reentrancy guard
+    // Check reentrancy guard (only when fault injection is enabled)
     if check_reentrancy_guard(FN_NAME) {
         return std::ptr::null_mut(); // UCS_OK
     }
@@ -700,11 +757,24 @@ pub extern "C" fn ucp_put_nbx(
 ) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_put_nbx";
 
-    // FAST PATH: if fault injection is disabled globally, immediately call real function
+    // ULTRA-FAST PATH: single atomic check, no thread-local work, no reentrancy guard
     if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
-        let real_fn_ptr =
-            get_real_function_ptr(&REAL_UCP_PUT_NBX, try_find_real_ucp_put_nbx, FN_NAME);
+        let real_fn_ptr = REAL_UCP_PUT_NBX.load(Ordering::Relaxed);
         if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(
+                UcpEpH,
+                *const c_void,
+                size_t,
+                u64,
+                UcpRkeyH,
+                UcpRequestParamT,
+            ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, buffer, count, remote_addr, rkey, param);
+        }
+        // fallback: lazy init if not yet initialized
+        let real_fn_ptr = try_find_real_ucp_put_nbx();
+        if !real_fn_ptr.is_null() {
+            REAL_UCP_PUT_NBX.store(real_fn_ptr, Ordering::Relaxed);
             let real_fn: extern "C" fn(
                 UcpEpH,
                 *const c_void,
@@ -717,7 +787,7 @@ pub extern "C" fn ucp_put_nbx(
         }
     }
 
-    // Check reentrancy guard
+    // Check reentrancy guard (only when fault injection is enabled)
     if check_reentrancy_guard(FN_NAME) {
         return std::ptr::null_mut(); // UCS_OK
     }
@@ -800,21 +870,25 @@ pub extern "C" fn ucp_put_nbx(
 pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_ep_flush_nbx";
 
-    // FAST PATH: if fault injection is disabled globally, immediately call real function
+    // ULTRA-FAST PATH: single atomic check, no thread-local work, no reentrancy guard
     if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
-        let real_fn_ptr = get_real_function_ptr(
-            &REAL_UCP_EP_FLUSH_NBX,
-            try_find_real_ucp_ep_flush_nbx,
-            FN_NAME,
-        );
+        let real_fn_ptr = REAL_UCP_EP_FLUSH_NBX.load(Ordering::Relaxed);
         if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(UcpEpH, UcpRequestParamT) -> UcsStatusPtr =
+                unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, param);
+        }
+        // fallback: lazy init if not yet initialized
+        let real_fn_ptr = try_find_real_ucp_ep_flush_nbx();
+        if !real_fn_ptr.is_null() {
+            REAL_UCP_EP_FLUSH_NBX.store(real_fn_ptr, Ordering::Relaxed);
             let real_fn: extern "C" fn(UcpEpH, UcpRequestParamT) -> UcsStatusPtr =
                 unsafe { std::mem::transmute(real_fn_ptr) };
             return real_fn(ep, param);
         }
     }
 
-    // Check reentrancy guard
+    // Check reentrancy guard (only when fault injection is enabled)
     if check_reentrancy_guard(FN_NAME) {
         return std::ptr::null_mut(); // UCS_OK
     }

@@ -5,9 +5,27 @@ use tracing::{error, info, warn};
 use crate::commands::{Command, HookConfig, Response, State};
 use crate::recorder::SerializableCallRecord;
 use crate::state::LOCAL_STATE;
-use crate::strategy::FaultStrategy;
+use crate::strategy::{FaultStrategy, SelectionMethod};
 
-// shared state removed - local state only
+// sync lock-free atomics with strategy state for hot path optimization
+fn sync_lockfree_strategy(strategy: &FaultStrategy) {
+    match &strategy.selection_method {
+        SelectionMethod::Random { probability } => {
+            LOCAL_STATE
+                .random_probability
+                .store(*probability, Ordering::Relaxed);
+            LOCAL_STATE
+                .use_lockfree_random
+                .store(true, Ordering::Relaxed);
+        }
+        _ => {
+            // pattern/replay strategies need mutex, disable lock-free path
+            LOCAL_STATE
+                .use_lockfree_random
+                .store(false, Ordering::Relaxed);
+        }
+    }
+}
 
 // Socket server functions for fault control
 pub fn get_current_state() -> State {
@@ -81,6 +99,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     let probability_u32 = value as u32;
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_probability(probability_u32);
+                    sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!(probability = value, "probability set");
                     Response {
@@ -112,6 +131,7 @@ pub fn handle_command(cmd: Command) -> Response {
             // Reset strategy to random with default probability
             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
             *strategy = FaultStrategy::new_random(25);
+            sync_lockfree_strategy(&strategy);
             drop(strategy);
 
             info!("reset to defaults");
@@ -134,6 +154,7 @@ pub fn handle_command(cmd: Command) -> Response {
                     } else {
                         *strategy = FaultStrategy::new_random_with_codes(current_prob, error_codes);
                     }
+                    sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!("switched to random fault strategy");
                     Response {
@@ -149,6 +170,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         *strategy =
                             FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
                     }
+                    sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!(pattern = %pattern, "switched to pattern fault strategy");
                     Response {
@@ -364,6 +386,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                 *strategy =
                     FaultStrategy::from_recorded_pattern(pattern.clone(), error_codes.clone());
+                sync_lockfree_strategy(&strategy);
                 drop(strategy);
 
                 info!(pattern = %pattern, error_codes = ?error_codes, "replaying recorded pattern");
@@ -388,6 +411,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                     strategy.set_pattern(pattern.clone());
+                    sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!(pattern = %pattern, "pattern updated");
                     Response {

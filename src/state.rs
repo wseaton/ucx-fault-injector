@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Mutex;
 use tracing::info;
 
@@ -36,6 +36,10 @@ pub struct LocalFaultState {
     pub strategy: Mutex<FaultStrategy>,
     pub hook_config: HookConfiguration,
 
+    // lock-free random strategy support (for hot path optimization)
+    pub random_probability: AtomicU32, // 0-100 percentage for random strategy
+    pub use_lockfree_random: AtomicBool, // true when using random strategy
+
     // Call recording and statistics (local only)
     pub call_recorder: CallRecordBuffer,
     pub total_calls: AtomicU64,
@@ -55,6 +59,8 @@ impl LocalFaultState {
             enabled: AtomicBool::new(false),
             strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
             hook_config: HookConfiguration::new(),
+            random_probability: AtomicU32::new(25), // default 25% matches strategy
+            use_lockfree_random: AtomicBool::new(true), // default to random strategy
             call_recorder: CallRecordBuffer::new(),
             total_calls: AtomicU64::new(0),
             faults_injected: AtomicU64::new(0),
@@ -79,21 +85,15 @@ pub static LOCAL_STATE: Lazy<LocalFaultState> = Lazy::new(|| {
 pub static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // reentrancy guard to prevent infinite recursion
-// use a function that can handle thread local storage destruction gracefully
-pub fn is_in_intercept() -> bool {
-    thread_local! {
-        static IN_INTERCEPT: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
-    }
+// simplified version without expensive catch_unwind - assumes TLS is always valid during interception
+thread_local! {
+    static IN_INTERCEPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-    // safely access thread local, returning false if TLS is destroyed
-    std::panic::catch_unwind(|| IN_INTERCEPT.with(|flag| *flag.borrow())).unwrap_or(false)
+pub fn is_in_intercept() -> bool {
+    IN_INTERCEPT.with(|flag| flag.get())
 }
 
 pub fn set_in_intercept(value: bool) {
-    thread_local! {
-        static IN_INTERCEPT: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
-    }
-
-    // safely set thread local, ignoring if TLS is destroyed
-    let _ = std::panic::catch_unwind(|| IN_INTERCEPT.with(|flag| *flag.borrow_mut() = value));
+    IN_INTERCEPT.with(|flag| flag.set(value));
 }
