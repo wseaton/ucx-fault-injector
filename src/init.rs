@@ -6,8 +6,188 @@ use tracing::{debug, error, info, warn};
 
 use crate::intercept::{init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
+use crate::strategy::FaultStrategy;
 use crate::subscriber::{get_current_state, start_file_watcher, start_socket_server};
 use crate::version_info;
+
+// environment variable configuration
+#[derive(Debug, Clone)]
+struct EnvConfig {
+    enabled: Option<bool>,
+    strategy: Option<String>,
+    probability: Option<u32>,
+    pattern: Option<String>,
+    error_codes: Option<Vec<i32>>,
+    hooks: Option<Vec<String>>,
+    ipc_enable: bool,
+    debug: bool,
+}
+
+impl EnvConfig {
+    fn from_env() -> Self {
+        let enabled = std::env::var("UCX_FAULT_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok().or_else(|| Some(v == "1")));
+
+        let strategy = std::env::var("UCX_FAULT_STRATEGY").ok();
+
+        let probability = std::env::var("UCX_FAULT_PROBABILITY")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&p| p <= 100);
+
+        let pattern = std::env::var("UCX_FAULT_PATTERN").ok();
+
+        let error_codes = std::env::var("UCX_FAULT_ERROR_CODES").ok().and_then(|v| {
+            let codes: Result<Vec<i32>, _> = v.split(',').map(|s| s.trim().parse()).collect();
+            codes.ok()
+        });
+
+        let hooks = std::env::var("UCX_FAULT_HOOKS")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+
+        let ipc_enable = std::env::var("UCX_FAULT_IPC_ENABLE").is_ok();
+
+        let debug = std::env::var("UCX_FAULT_DEBUG").is_ok();
+
+        Self {
+            enabled,
+            strategy,
+            probability,
+            pattern,
+            error_codes,
+            hooks,
+            ipc_enable,
+            debug,
+        }
+    }
+
+    fn apply(&self) {
+        info!("applying environment variable configuration");
+
+        // set debug mode first
+        if self.debug {
+            DEBUG_ENABLED.store(true, Ordering::Relaxed);
+            info!("debug mode enabled via UCX_FAULT_DEBUG");
+        }
+
+        // configure hooks (default: all enabled)
+        if let Some(ref hooks) = self.hooks {
+            // disable all first if specific hooks requested
+            LOCAL_STATE
+                .hook_config
+                .ucp_get_nbx_enabled
+                .store(false, Ordering::Relaxed);
+            LOCAL_STATE
+                .hook_config
+                .ucp_put_nbx_enabled
+                .store(false, Ordering::Relaxed);
+            LOCAL_STATE
+                .hook_config
+                .ucp_ep_flush_nbx_enabled
+                .store(false, Ordering::Relaxed);
+
+            for hook in hooks {
+                match hook.as_str() {
+                    "ucp_get_nbx" | "get" => {
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        info!("enabled hook: ucp_get_nbx");
+                    }
+                    "ucp_put_nbx" | "put" => {
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        info!("enabled hook: ucp_put_nbx");
+                    }
+                    "ucp_ep_flush_nbx" | "flush" => {
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        info!("enabled hook: ucp_ep_flush_nbx");
+                    }
+                    "all" => {
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        info!("enabled all hooks");
+                    }
+                    _ => warn!(hook = %hook, "unknown hook name, ignoring"),
+                }
+            }
+        }
+
+        // configure strategy
+        let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+
+        match self.strategy.as_deref() {
+            Some("random") | None => {
+                let prob = self.probability.unwrap_or(25);
+                if let Some(ref codes) = self.error_codes {
+                    *strategy = FaultStrategy::new_random_with_codes(prob, codes.clone());
+                    info!(probability = prob, error_codes = ?codes, "configured random strategy from env");
+                } else {
+                    *strategy = FaultStrategy::new_random(prob);
+                    info!(probability = prob, "configured random strategy from env");
+                }
+                // sync lock-free atomics
+                LOCAL_STATE
+                    .random_probability
+                    .store(prob, Ordering::Relaxed);
+                LOCAL_STATE
+                    .use_lockfree_random
+                    .store(true, Ordering::Relaxed);
+            }
+            Some("pattern") => {
+                if let Some(ref pattern) = self.pattern {
+                    if let Some(ref codes) = self.error_codes {
+                        *strategy =
+                            FaultStrategy::new_pattern_with_codes(pattern.clone(), codes.clone());
+                        info!(pattern = %pattern, error_codes = ?codes, "configured pattern strategy from env");
+                    } else {
+                        *strategy = FaultStrategy::new_pattern(pattern.clone());
+                        info!(pattern = %pattern, "configured pattern strategy from env");
+                    }
+                    LOCAL_STATE
+                        .use_lockfree_random
+                        .store(false, Ordering::Relaxed);
+                } else {
+                    warn!("pattern strategy requested but no UCX_FAULT_PATTERN provided, using default random");
+                }
+            }
+            Some(other) => {
+                warn!(strategy = %other, "unknown strategy, using default random");
+            }
+        }
+        drop(strategy);
+
+        // enable fault injection if requested
+        if let Some(enabled) = self.enabled {
+            LOCAL_STATE.enabled.store(enabled, Ordering::Relaxed);
+            info!(
+                enabled,
+                "fault injection {}",
+                if enabled { "ENABLED" } else { "DISABLED" }
+            );
+        } else {
+            info!("fault injection DISABLED by default (set UCX_FAULT_ENABLED=1 to enable)");
+        }
+    }
+}
 
 // IPC backend selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,44 +305,16 @@ pub fn init_fault_injector() {
 
     let current_pid = std::process::id();
 
+    // parse environment variable configuration FIRST
+    let env_config = EnvConfig::from_env();
+    debug!("parsed environment configuration: {:?}", env_config);
+
     // Check if function interception is already initialized using file locking
     let function_intercept_already_initialized = is_already_initialized();
 
     if !function_intercept_already_initialized {
         info!(version = %version_info(), "UCX fault injector loaded");
         info!(pid = current_pid, "initialization starting");
-
-        // Determine which IPC backend to use
-        let ipc_backend = IpcBackend::from_env();
-
-        // Clean up old IPC artifacts based on backend
-        match ipc_backend {
-            IpcBackend::Socket => {
-                // Remove stale socket for this PID
-                let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
-                if std::path::Path::new(&socket_path).exists() {
-                    if let Err(e) = std::fs::remove_file(&socket_path) {
-                        warn!(socket_path, error = %e, "failed to remove stale socket");
-                    } else {
-                        info!(socket_path, "removed stale socket file");
-                    }
-                }
-            }
-            IpcBackend::File => {
-                // Clear old command file to prevent replay of stale commands
-                let command_file = "/tmp/ucx-fault-commands";
-                if std::path::Path::new(command_file).exists() {
-                    if let Err(e) = std::fs::remove_file(command_file) {
-                        warn!(command_file, error = %e, "failed to clear old command file");
-                    } else {
-                        info!(
-                            command_file,
-                            "cleared old command file to prevent stale command replay"
-                        );
-                    }
-                }
-            }
-        }
 
         // Force initialization of real functions to check symbol loading
         debug!("initializing real UCX function pointers");
@@ -171,7 +323,7 @@ pub fn init_fault_injector() {
         init_real_ucp_ep_flush_nbx();
 
         // Print detailed debug info if debug mode is enabled
-        if DEBUG_ENABLED.load(Ordering::Relaxed) {
+        if env_config.debug {
             print_library_debug_info();
         }
 
@@ -188,16 +340,12 @@ pub fn init_fault_injector() {
         );
     }
 
-    // check for debug mode
-    if std::env::var("UCX_FAULT_DEBUG").is_ok() {
-        DEBUG_ENABLED.store(true, Ordering::Relaxed);
-        info!("debug mode enabled via UCX_FAULT_DEBUG environment variable");
-    }
-
-    // shared state removed - using local state only for simplicity and reliability
-
-    // Always initialize local state for each process (needed for IPC)
+    // Always initialize local state for each process
     let _ = &*LOCAL_STATE; // Force initialization
+
+    // Apply environment variable configuration
+    env_config.apply();
+
     let state = get_current_state();
     info!(
         enabled = state.enabled,
@@ -205,54 +353,100 @@ pub fn init_fault_injector() {
         probability = state.probability,
         pattern = ?state.pattern,
         error_codes = ?state.error_codes,
-        "local process state initialized"
+        "configuration applied"
     );
 
-    // Start IPC backend based on environment variable
-    let ipc_backend = IpcBackend::from_env();
-    match ipc_backend {
-        IpcBackend::Socket => {
-            info!("starting Unix domain socket server for commands");
-            start_socket_server();
-            let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
-            info!(socket_path, backend = "socket", "IPC server started");
+    // ONLY start IPC if explicitly enabled via UCX_FAULT_IPC_ENABLE
+    if env_config.ipc_enable {
+        info!("IPC enabled via UCX_FAULT_IPC_ENABLE");
 
-            if !function_intercept_already_initialized {
-                info!("socket-based commands:");
-                info!("  Use ucx-fault-client to send commands via Unix domain sockets");
-                info!("  Examples: ./ucx-fault-client toggle");
-                info!("           ./ucx-fault-client probability 50");
-                info!("           ./ucx-fault-client record-dump");
-                info!("           ./ucx-fault-client status");
+        // Determine which IPC backend to use
+        let ipc_backend = IpcBackend::from_env();
+
+        // Clean up old IPC artifacts based on backend
+        match ipc_backend {
+            IpcBackend::Socket => {
+                // Remove stale socket for this PID
+                let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
+                if std::path::Path::new(&socket_path).exists() {
+                    if let Err(e) = std::fs::remove_file(&socket_path) {
+                        warn!(socket_path, error = %e, "failed to remove stale socket");
+                    } else {
+                        debug!(socket_path, "removed stale socket file");
+                    }
+                }
+            }
+            IpcBackend::File => {
+                // Clear old command file to prevent replay of stale commands
+                let command_file = "/tmp/ucx-fault-commands";
+                if std::path::Path::new(command_file).exists() {
+                    if let Err(e) = std::fs::remove_file(command_file) {
+                        warn!(command_file, error = %e, "failed to clear old command file");
+                    } else {
+                        debug!(
+                            command_file,
+                            "cleared old command file to prevent stale command replay"
+                        );
+                    }
+                }
             }
         }
-        IpcBackend::File => {
-            info!("starting file watcher for commands");
-            start_file_watcher();
-            info!(
-                command_file = "/tmp/ucx-fault-commands",
-                backend = "file",
-                "IPC server started"
-            );
 
-            if !function_intercept_already_initialized {
-                info!("file-based commands:");
-                info!("  Use ucx-fault-client to send commands via file");
-                info!("  Examples: ./ucx-fault-client toggle");
-                info!("           ./ucx-fault-client probability 50");
-                info!("           ./ucx-fault-client record-dump");
-                info!("           ./ucx-fault-client status");
+        // Start IPC backend
+        match ipc_backend {
+            IpcBackend::Socket => {
+                info!("starting Unix domain socket server for runtime commands");
+                start_socket_server();
+                let socket_path = format!("/tmp/ucx-fault-{}.sock", current_pid);
+                info!(socket_path, backend = "socket", "IPC server started");
+
+                if !function_intercept_already_initialized {
+                    info!("socket-based commands:");
+                    info!("  Use ucx-fault-client to send commands via Unix domain sockets");
+                    info!("  Examples: ./ucx-fault-client toggle");
+                    info!("           ./ucx-fault-client probability 50");
+                    info!("           ./ucx-fault-client status");
+                }
             }
+            IpcBackend::File => {
+                info!("starting file watcher for runtime commands");
+                start_file_watcher();
+                info!(
+                    command_file = "/tmp/ucx-fault-commands",
+                    backend = "file",
+                    "IPC server started"
+                );
+
+                if !function_intercept_already_initialized {
+                    info!("file-based commands:");
+                    info!("  Use ucx-fault-client to send commands via file");
+                    info!("  Examples: ./ucx-fault-client toggle");
+                    info!("           ./ucx-fault-client probability 50");
+                    info!("           ./ucx-fault-client status");
+                }
+            }
+        }
+    } else {
+        info!("IPC DISABLED (set UCX_FAULT_IPC_ENABLE=1 to enable runtime control)");
+        info!("fault injector configured via environment variables only");
+        if !function_intercept_already_initialized {
+            info!("available environment variables:");
+            info!("  UCX_FAULT_ENABLED=1           - enable fault injection at startup");
+            info!("  UCX_FAULT_STRATEGY=random     - set strategy (random|pattern)");
+            info!("  UCX_FAULT_PROBABILITY=25      - set probability (0-100) for random");
+            info!("  UCX_FAULT_PATTERN=XOOOXOOO    - set pattern for pattern strategy");
+            info!("  UCX_FAULT_ERROR_CODES=-3,-6   - comma-separated error codes");
+            info!("  UCX_FAULT_HOOKS=ucp_get_nbx   - which hooks to enable (default: all)");
+            info!("  UCX_FAULT_IPC_ENABLE=1        - enable runtime control via IPC");
+            info!("  UCX_FAULT_DEBUG=1             - enable debug logging");
         }
     }
 
     info!(
         pid = current_pid,
-        "UCX fault injector process initialization complete"
+        ipc_enabled = env_config.ipc_enable,
+        "UCX fault injector initialization complete"
     );
-    if !function_intercept_already_initialized {
-        info!("to enable debug output, set UCX_FAULT_DEBUG=1 in environment");
-    }
 }
 
 // automatic initialization via constructor (disabled during tests)
