@@ -208,9 +208,19 @@ pub fn handle_command(cmd: Command) -> Response {
                     Ok(codes) => {
                         let error_codes = {
                             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                            strategy.set_error_codes(codes);
+                            strategy.set_error_codes(codes.clone());
                             let result = strategy.get_error_codes().to_vec();
                             drop(strategy);
+
+                            // sync lock-free error codes for random strategy
+                            if LOCAL_STATE.use_lockfree_random.load(Ordering::Relaxed) {
+                                let count = codes.len().min(crate::state::MAX_LOCKFREE_ERROR_CODES);
+                                for (i, &code) in codes.iter().take(count).enumerate() {
+                                    LOCAL_STATE.lockfree_error_codes[i].store(code, Ordering::Relaxed);
+                                }
+                                LOCAL_STATE.lockfree_error_code_count.store(count, Ordering::Relaxed);
+                            }
+
                             result
                         };
                         info!(error_codes = ?error_codes, "error codes updated");
@@ -234,9 +244,21 @@ pub fn handle_command(cmd: Command) -> Response {
                 // Legacy support for error_codes field
                 let error_codes = {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_error_codes(codes);
+                    strategy.set_error_codes(codes.clone());
                     let result = strategy.get_error_codes().to_vec();
                     drop(strategy);
+
+                    // sync lock-free error codes for random strategy
+                    if LOCAL_STATE.use_lockfree_random.load(Ordering::Relaxed) {
+                        let count = codes.len().min(crate::state::MAX_LOCKFREE_ERROR_CODES);
+                        for (i, &code) in codes.iter().take(count).enumerate() {
+                            LOCAL_STATE.lockfree_error_codes[i].store(code, Ordering::Relaxed);
+                        }
+                        LOCAL_STATE
+                            .lockfree_error_code_count
+                            .store(count, Ordering::Relaxed);
+                    }
+
                     result
                 };
                 info!(error_codes = ?error_codes, "error codes updated");

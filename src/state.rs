@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::Mutex;
 use tracing::info;
 
@@ -30,6 +30,9 @@ impl Default for HookConfiguration {
     }
 }
 
+// max error codes for lock-free storage (8 should be plenty)
+pub const MAX_LOCKFREE_ERROR_CODES: usize = 8;
+
 // Local process state structure (no shared memory)
 pub struct LocalFaultState {
     pub enabled: AtomicBool,
@@ -39,6 +42,10 @@ pub struct LocalFaultState {
     // lock-free random strategy support (for hot path optimization)
     pub random_probability: AtomicU32, // 0-10000 scaled percentage (0.01% precision)
     pub use_lockfree_random: AtomicBool, // true when using random strategy
+
+    // lock-free error code storage (for random strategy hot path)
+    pub lockfree_error_codes: [AtomicI32; MAX_LOCKFREE_ERROR_CODES],
+    pub lockfree_error_code_count: AtomicUsize,
 
     // Call recording and statistics (local only)
     pub call_recorder: CallRecordBuffer,
@@ -61,6 +68,17 @@ impl LocalFaultState {
             hook_config: HookConfiguration::new(),
             random_probability: AtomicU32::new(2500), // default 25% (scaled: 25.00 * 100)
             use_lockfree_random: AtomicBool::new(true), // default to random strategy
+            lockfree_error_codes: [
+                AtomicI32::new(crate::ucx::UCS_ERR_IO_ERROR),
+                AtomicI32::new(crate::ucx::UCS_ERR_UNREACHABLE),
+                AtomicI32::new(crate::ucx::UCS_ERR_TIMED_OUT),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+            ],
+            lockfree_error_code_count: AtomicUsize::new(3), // default 3 codes
             call_recorder: CallRecordBuffer::new(),
             total_calls: AtomicU64::new(0),
             faults_injected: AtomicU64::new(0),

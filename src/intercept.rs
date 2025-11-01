@@ -584,8 +584,18 @@ fn should_inject_lockfree_random() -> Option<UcsStatus> {
     }
 
     if fast_random() < probability {
-        // use default error code for lock-free path
-        Some(crate::ucx::UCS_ERR_IO_ERROR)
+        // randomly select from configured error codes
+        let count = LOCAL_STATE
+            .lockfree_error_code_count
+            .load(Ordering::Relaxed);
+        if count == 0 {
+            return Some(crate::ucx::UCS_ERR_IO_ERROR); // fallback
+        }
+
+        // use fast_random to select error code
+        let index = (fast_random() as usize) % count;
+        let error_code = LOCAL_STATE.lockfree_error_codes[index].load(Ordering::Relaxed);
+        Some(error_code)
     } else {
         None
     }
