@@ -31,10 +31,12 @@ impl EnvConfig {
 
         let strategy = std::env::var("UCX_FAULT_STRATEGY").ok();
 
-        let probability = std::env::var("UCX_FAULT_PROBABILITY")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&p| p <= 100);
+        let probability = std::env::var("UCX_FAULT_PROBABILITY").ok().and_then(|v| {
+            v.parse::<f64>()
+                .ok()
+                .filter(|&p| (0.0..=100.0).contains(&p))
+                .map(|p| (p * 100.0) as u32) // scale to 0-10000 range
+        });
 
         let pattern = std::env::var("UCX_FAULT_PATTERN").ok();
 
@@ -433,7 +435,7 @@ pub fn init_fault_injector() {
             info!("available environment variables:");
             info!("  UCX_FAULT_ENABLED=1           - enable fault injection at startup");
             info!("  UCX_FAULT_STRATEGY=random     - set strategy (random|pattern)");
-            info!("  UCX_FAULT_PROBABILITY=25      - set probability (0-100) for random");
+            info!("  UCX_FAULT_PROBABILITY=25      - set probability (0.0-100.0) for random");
             info!("  UCX_FAULT_PATTERN=XOOOXOOO    - set pattern for pattern strategy");
             info!("  UCX_FAULT_ERROR_CODES=-3,-6   - comma-separated error codes");
             info!("  UCX_FAULT_HOOKS=ucp_get_nbx   - which hooks to enable (default: all)");

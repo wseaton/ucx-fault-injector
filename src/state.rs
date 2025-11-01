@@ -37,7 +37,7 @@ pub struct LocalFaultState {
     pub hook_config: HookConfiguration,
 
     // lock-free random strategy support (for hot path optimization)
-    pub random_probability: AtomicU32, // 0-100 percentage for random strategy
+    pub random_probability: AtomicU32, // 0-10000 scaled percentage (0.01% precision)
     pub use_lockfree_random: AtomicBool, // true when using random strategy
 
     // Call recording and statistics (local only)
@@ -57,9 +57,9 @@ impl LocalFaultState {
     fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),
-            strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
+            strategy: Mutex::new(FaultStrategy::new_random(2500)), // default 25% (scaled)
             hook_config: HookConfiguration::new(),
-            random_probability: AtomicU32::new(25), // default 25% matches strategy
+            random_probability: AtomicU32::new(2500), // default 25% (scaled: 25.00 * 100)
             use_lockfree_random: AtomicBool::new(true), // default to random strategy
             call_recorder: CallRecordBuffer::new(),
             total_calls: AtomicU64::new(0),

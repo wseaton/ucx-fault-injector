@@ -160,7 +160,8 @@ impl FaultStrategy {
                     .unwrap()
                     .as_nanos()
                     .hash(&mut hasher);
-                let random = (hasher.finish() % 100) as u32;
+                // use 0-9999 range for 0.01% precision
+                let random = (hasher.finish() % 10000) as u32;
 
                 if random < *probability {
                     // randomly select an error code from the pool

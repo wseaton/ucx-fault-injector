@@ -52,7 +52,7 @@ pub fn get_current_state() -> State {
 
     State {
         enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
-        probability: strategy.get_probability().unwrap_or(0),
+        probability: strategy.get_probability().unwrap_or(0) as f64 / 100.0, // unscale for display
         strategy: strategy.get_strategy_name().to_string(),
         pattern: strategy.get_pattern().map(|s| s.to_string()),
         error_codes: strategy.get_error_codes().to_vec(),
@@ -96,9 +96,9 @@ pub fn handle_command(cmd: Command) -> Response {
         "set_probability" => {
             if let Some(value) = cmd.value {
                 if (0.0..=100.0).contains(&value) {
-                    let probability_u32 = value as u32;
+                    let probability_scaled = (value * 100.0) as u32; // scale to 0-10000
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_probability(probability_u32);
+                    strategy.set_probability(probability_scaled);
                     sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!(probability = value, "probability set");
@@ -128,9 +128,9 @@ pub fn handle_command(cmd: Command) -> Response {
         "reset" => {
             LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
 
-            // Reset strategy to random with default probability
+            // Reset strategy to random with default probability (scaled)
             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-            *strategy = FaultStrategy::new_random(25);
+            *strategy = FaultStrategy::new_random(2500); // 25% (scaled)
             sync_lockfree_strategy(&strategy);
             drop(strategy);
 
@@ -148,7 +148,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 let error_codes = cmd.error_codes.unwrap_or_default();
 
                 if pattern == "random" {
-                    let current_prob = strategy.get_probability().unwrap_or(25);
+                    let current_prob = strategy.get_probability().unwrap_or(2500); // default 25% (scaled)
                     if error_codes.is_empty() {
                         *strategy = FaultStrategy::new_random(current_prob);
                     } else {

@@ -23,7 +23,7 @@ pub struct Response {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct State {
     pub enabled: bool,
-    pub probability: u32,
+    pub probability: f64, // real percentage 0.0-100.0 for display
     pub strategy: String,
     pub pattern: Option<String>,
     pub error_codes: Vec<i32>,

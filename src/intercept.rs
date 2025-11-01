@@ -563,6 +563,7 @@ thread_local! {
 
 // fast, lock-free random number generator (xorshift)
 #[inline(always)]
+// returns 0-9999 for 0.01% precision (scale factor of 100)
 fn fast_random() -> u32 {
     THREAD_RNG.with(|rng| {
         let mut x = rng.get();
@@ -570,7 +571,7 @@ fn fast_random() -> u32 {
         x ^= x >> 7;
         x ^= x << 17;
         rng.set(x);
-        (x % 100) as u32
+        (x % 10000) as u32
     })
 }
 

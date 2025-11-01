@@ -14,7 +14,7 @@ use crate::ucx::*;
 
 #[test]
 fn test_fault_strategy_random() {
-    let mut strategy = FaultStrategy::new_random(100); // 100% probability
+    let mut strategy = FaultStrategy::new_random(10000); // 100% probability (scaled)
     assert!(strategy.should_inject().is_some());
 
     let mut strategy = FaultStrategy::new_random(0); // 0% probability
@@ -66,7 +66,8 @@ fn test_ucp_get_nbx_mock() {
     // Force fault injection with 100% probability and specific error code
     {
         let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-        *strategy = FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_UNREACHABLE]);
+        *strategy = FaultStrategy::new_random_with_codes(10000, vec![UCS_ERR_UNREACHABLE]);
+        // 100% (scaled)
     }
 
     // Test fault injection logic
@@ -95,12 +96,12 @@ fn test_get_current_state() {
 
     {
         let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-        *strategy = FaultStrategy::new_random(75);
+        *strategy = FaultStrategy::new_random(7500); // 75% (scaled)
     }
 
     let state = get_current_state();
     assert!(state.enabled);
-    assert_eq!(state.probability, 75);
+    assert_eq!(state.probability, 75.0); // displayed as unscaled
     assert_eq!(state.strategy, "random");
     assert!(!state.error_codes.is_empty());
 }
@@ -109,7 +110,7 @@ fn test_get_current_state() {
 fn test_error_code_pools() {
     // Test random strategy with custom error codes
     let mut strategy =
-        FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_NO_MEMORY, UCS_ERR_BUSY]);
+        FaultStrategy::new_random_with_codes(10000, vec![UCS_ERR_NO_MEMORY, UCS_ERR_BUSY]); // 100% (scaled)
     for _ in 0..10 {
         if let Some(error_code) = strategy.should_inject() {
             assert!(error_code == UCS_ERR_NO_MEMORY || error_code == UCS_ERR_BUSY);
@@ -235,7 +236,7 @@ fn test_command_roundtrip() {
 
 #[test]
 fn test_set_probability_with_float() {
-    // test that float probabilities are properly converted to u32
+    // test that float probabilities are properly handled with full precision
     let cmd = Command {
         command: "set_probability".to_string(),
         value: Some(75.5),
@@ -249,9 +250,9 @@ fn test_set_probability_with_float() {
     let response = handle_command(cmd);
     assert_eq!(response.status, "ok");
 
-    // verify internal state was set correctly (truncated to 75)
+    // verify internal state was set correctly (with full precision)
     let state = get_current_state();
-    assert_eq!(state.probability, 75);
+    assert_eq!(state.probability, 75.5);
 }
 
 #[test]

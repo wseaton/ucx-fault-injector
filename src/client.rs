@@ -62,7 +62,7 @@ struct Response {
 #[derive(Deserialize, Debug)]
 struct State {
     enabled: bool,
-    probability: u32,
+    probability: f64, // real percentage 0.0-100.0
     strategy: String,
     pattern: Option<String>,
     error_codes: Vec<i32>,
