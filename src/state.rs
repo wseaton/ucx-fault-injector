@@ -6,21 +6,27 @@ use tracing::info;
 use crate::recorder::CallRecordBuffer;
 use crate::strategy::FaultStrategy;
 
-// configuration for which UCX function hooks are enabled
-#[derive(Debug, Clone)]
+// configuration for which UCX function hooks are enabled (using atomics for lock-free access)
+#[derive(Debug)]
 pub struct HookConfiguration {
-    pub ucp_get_nbx_enabled: bool,
-    pub ucp_put_nbx_enabled: bool,
-    pub ucp_ep_flush_nbx_enabled: bool,
+    pub ucp_get_nbx_enabled: AtomicBool,
+    pub ucp_put_nbx_enabled: AtomicBool,
+    pub ucp_ep_flush_nbx_enabled: AtomicBool,
+}
+
+impl HookConfiguration {
+    pub fn new() -> Self {
+        Self {
+            ucp_get_nbx_enabled: AtomicBool::new(true), // reads enabled by default
+            ucp_put_nbx_enabled: AtomicBool::new(true), // writes enabled by default
+            ucp_ep_flush_nbx_enabled: AtomicBool::new(true), // flush enabled by default
+        }
+    }
 }
 
 impl Default for HookConfiguration {
     fn default() -> Self {
-        Self {
-            ucp_get_nbx_enabled: true,      // reads enabled by default
-            ucp_put_nbx_enabled: true,      // writes enabled by default
-            ucp_ep_flush_nbx_enabled: true, // flush enabled by default
-        }
+        Self::new()
     }
 }
 
@@ -28,7 +34,7 @@ impl Default for HookConfiguration {
 pub struct LocalFaultState {
     pub enabled: AtomicBool,
     pub strategy: Mutex<FaultStrategy>,
-    pub hook_config: Mutex<HookConfiguration>,
+    pub hook_config: HookConfiguration,
 
     // Call recording and statistics (local only)
     pub call_recorder: CallRecordBuffer,
@@ -48,7 +54,7 @@ impl LocalFaultState {
         Self {
             enabled: AtomicBool::new(false),
             strategy: Mutex::new(FaultStrategy::new_random(25)), // default 25%
-            hook_config: Mutex::new(HookConfiguration::default()),
+            hook_config: HookConfiguration::new(),
             call_recorder: CallRecordBuffer::new(),
             total_calls: AtomicU64::new(0),
             faults_injected: AtomicU64::new(0),

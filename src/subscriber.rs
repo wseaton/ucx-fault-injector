@@ -17,11 +17,19 @@ pub fn get_current_state() -> State {
     let total_calls = LOCAL_STATE.call_recorder.get_total_records();
     let pattern_length = LOCAL_STATE.call_recorder.generate_pattern().len();
 
-    let hook_config = LOCAL_STATE.hook_config.lock().unwrap();
     let hook_config_state = HookConfig {
-        ucp_get_nbx_enabled: hook_config.ucp_get_nbx_enabled,
-        ucp_put_nbx_enabled: hook_config.ucp_put_nbx_enabled,
-        ucp_ep_flush_nbx_enabled: hook_config.ucp_ep_flush_nbx_enabled,
+        ucp_get_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_get_nbx_enabled
+            .load(Ordering::Relaxed),
+        ucp_put_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_put_nbx_enabled
+            .load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_ep_flush_nbx_enabled
+            .load(Ordering::Relaxed),
     };
 
     State {
@@ -408,24 +416,41 @@ pub fn handle_command(cmd: Command) -> Response {
         }
         "enable_hook" => {
             if let Some(hook_name) = cmd.hook_name {
-                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
                 let result = match hook_name.as_str() {
                     "ucp_get_nbx" => {
-                        hook_config.ucp_get_nbx_enabled = true;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(true, Ordering::Relaxed);
                         "ucp_get_nbx hook enabled"
                     }
                     "ucp_put_nbx" => {
-                        hook_config.ucp_put_nbx_enabled = true;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(true, Ordering::Relaxed);
                         "ucp_put_nbx hook enabled"
                     }
                     "ucp_ep_flush_nbx" => {
-                        hook_config.ucp_ep_flush_nbx_enabled = true;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(true, Ordering::Relaxed);
                         "ucp_ep_flush_nbx hook enabled"
                     }
                     "all" => {
-                        hook_config.ucp_get_nbx_enabled = true;
-                        hook_config.ucp_put_nbx_enabled = true;
-                        hook_config.ucp_ep_flush_nbx_enabled = true;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(true, Ordering::Relaxed);
                         "all hooks enabled"
                     }
                     _ => {
@@ -455,24 +480,41 @@ pub fn handle_command(cmd: Command) -> Response {
         }
         "disable_hook" => {
             if let Some(hook_name) = cmd.hook_name {
-                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
                 let result = match hook_name.as_str() {
                     "ucp_get_nbx" => {
-                        hook_config.ucp_get_nbx_enabled = false;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(false, Ordering::Relaxed);
                         "ucp_get_nbx hook disabled"
                     }
                     "ucp_put_nbx" => {
-                        hook_config.ucp_put_nbx_enabled = false;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(false, Ordering::Relaxed);
                         "ucp_put_nbx hook disabled"
                     }
                     "ucp_ep_flush_nbx" => {
-                        hook_config.ucp_ep_flush_nbx_enabled = false;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(false, Ordering::Relaxed);
                         "ucp_ep_flush_nbx hook disabled"
                     }
                     "all" => {
-                        hook_config.ucp_get_nbx_enabled = false;
-                        hook_config.ucp_put_nbx_enabled = false;
-                        hook_config.ucp_ep_flush_nbx_enabled = false;
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_get_nbx_enabled
+                            .store(false, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_put_nbx_enabled
+                            .store(false, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_ep_flush_nbx_enabled
+                            .store(false, Ordering::Relaxed);
                         "all hooks disabled"
                     }
                     _ => {

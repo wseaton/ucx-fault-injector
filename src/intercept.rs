@@ -1,5 +1,5 @@
 use libc::{c_void, size_t};
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, error, trace, warn};
 
 use crate::recorder::{CallParams, FunctionType};
@@ -433,29 +433,30 @@ fn update_call_stats(calls_counter: &AtomicU64) {
 }
 
 // handle fault injection logic and recording with full parameter capture
+#[inline(always)]
 fn handle_fault_injection(
     fn_name: &str,
+    hook_enabled: &AtomicBool,
     call_num: u32,
     faults_counter: &AtomicU64,
     params: &CallParams,
 ) -> Option<UcsStatusPtr> {
-    if let Some(error_code) = should_inject_fault_for_function(fn_name) {
-        // record the fault injection decision with full parameters
-        debug!(
-            pid = std::process::id(),
-            "recording fault injection call #{}: error_code={}", call_num, error_code
-        );
-        LOCAL_STATE
-            .call_recorder
-            .record_call_with_params(true, error_code, params);
+    if let Some(error_code) = should_inject_fault_for_hook(hook_enabled) {
+        // update statistics
         LOCAL_STATE.faults_injected.fetch_add(1, Ordering::Relaxed);
         faults_counter.fetch_add(1, Ordering::Relaxed);
         LOCAL_STATE.calls_since_fault.store(0, Ordering::Relaxed);
-        debug!(
-            pid = std::process::id(),
-            "fault recorded successfully, total_records={}",
-            LOCAL_STATE.call_recorder.get_total_records()
-        );
+
+        // only record if recording is enabled (off by default for performance)
+        if LOCAL_STATE.call_recorder.is_recording_enabled() {
+            debug!(
+                pid = std::process::id(),
+                "recording fault injection call #{}: error_code={}", call_num, error_code
+            );
+            LOCAL_STATE
+                .call_recorder
+                .record_call_with_params(true, error_code, params);
+        }
 
         warn!(
             pid = std::process::id(),
@@ -466,22 +467,19 @@ fn handle_fault_injection(
         );
         Some(ucs_status_to_ptr(error_code))
     } else {
-        // record the successful call with full parameters
-        debug!(
-            pid = std::process::id(),
-            "recording successful call #{}", call_num
-        );
-        LOCAL_STATE
-            .call_recorder
-            .record_call_with_params(false, 0, params);
+        // only record successful calls if recording is explicitly enabled
+        if LOCAL_STATE.call_recorder.is_recording_enabled() {
+            debug!(
+                pid = std::process::id(),
+                "recording successful call #{}", call_num
+            );
+            LOCAL_STATE
+                .call_recorder
+                .record_call_with_params(false, 0, params);
+        }
         LOCAL_STATE
             .calls_since_fault
             .fetch_add(1, Ordering::Relaxed);
-        debug!(
-            pid = std::process::id(),
-            "success recorded, total_records={}",
-            LOCAL_STATE.call_recorder.get_total_records()
-        );
         None
     }
 }
@@ -553,29 +551,33 @@ pub fn should_inject_fault() -> Option<UcsStatus> {
     strategy.should_inject()
 }
 
-// helper function to decide fault injection for specific function
-pub fn should_inject_fault_for_function(function_name: &str) -> Option<UcsStatus> {
-    let enabled = LOCAL_STATE.enabled.load(Ordering::Relaxed);
-
-    if !enabled {
+// optimized helper function that takes the hook flag directly (no string matching!)
+#[inline(always)]
+pub fn should_inject_fault_for_hook(hook_enabled: &AtomicBool) -> Option<UcsStatus> {
+    // fast path: check if fault injection is globally enabled
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
         return None;
     }
 
-    // Check if this specific hook is enabled
-    let hook_config = LOCAL_STATE.hook_config.lock().unwrap();
-    let hook_enabled = match function_name {
-        "ucp_get_nbx" => hook_config.ucp_get_nbx_enabled,
-        "ucp_put_nbx" => hook_config.ucp_put_nbx_enabled,
-        "ucp_ep_flush_nbx" => hook_config.ucp_ep_flush_nbx_enabled,
-        _ => false,
-    };
-
-    if !hook_enabled {
+    // fast path: check if this specific hook is enabled (single atomic load, no string matching!)
+    if !hook_enabled.load(Ordering::Relaxed) {
         return None;
     }
 
+    // slow path: only lock strategy mutex if we're actually injecting
     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
     strategy.should_inject()
+}
+
+// legacy function for backward compatibility (not used in hot path)
+pub fn should_inject_fault_for_function(function_name: &str) -> Option<UcsStatus> {
+    let hook_enabled = match function_name {
+        "ucp_get_nbx" => &LOCAL_STATE.hook_config.ucp_get_nbx_enabled,
+        "ucp_put_nbx" => &LOCAL_STATE.hook_config.ucp_put_nbx_enabled,
+        "ucp_ep_flush_nbx" => &LOCAL_STATE.hook_config.ucp_ep_flush_nbx_enabled,
+        _ => return None,
+    };
+    should_inject_fault_for_hook(hook_enabled)
 }
 
 // UCX function interceptors - focused on ucp_get_nbx for remote reads
@@ -589,6 +591,24 @@ pub extern "C" fn ucp_get_nbx(
     param: UcpRequestParamT,
 ) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_get_nbx";
+
+    // FAST PATH: if fault injection is disabled globally, immediately call real function
+    // this is a single atomic load with relaxed ordering - minimal overhead
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
+        let real_fn_ptr =
+            get_real_function_ptr(&REAL_UCP_GET_NBX, try_find_real_ucp_get_nbx, FN_NAME);
+        if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(
+                UcpEpH,
+                *mut c_void,
+                size_t,
+                u64,
+                UcpRkeyH,
+                UcpRequestParamT,
+            ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, buffer, count, remote_addr, rkey, param);
+        }
+    }
 
     // Check reentrancy guard
     if check_reentrancy_guard(FN_NAME) {
@@ -623,9 +643,13 @@ pub extern "C" fn ucp_get_nbx(
         endpoint: ep as u64,
         rkey: rkey as u64,
     };
-    if let Some(fault_result) =
-        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_get_nbx_faults, &params)
-    {
+    if let Some(fault_result) = handle_fault_injection(
+        FN_NAME,
+        &LOCAL_STATE.hook_config.ucp_get_nbx_enabled,
+        call_num,
+        &LOCAL_STATE.ucp_get_nbx_faults,
+        &params,
+    ) {
         set_in_intercept(false);
         return fault_result;
     }
@@ -676,6 +700,23 @@ pub extern "C" fn ucp_put_nbx(
 ) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_put_nbx";
 
+    // FAST PATH: if fault injection is disabled globally, immediately call real function
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
+        let real_fn_ptr =
+            get_real_function_ptr(&REAL_UCP_PUT_NBX, try_find_real_ucp_put_nbx, FN_NAME);
+        if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(
+                UcpEpH,
+                *const c_void,
+                size_t,
+                u64,
+                UcpRkeyH,
+                UcpRequestParamT,
+            ) -> UcsStatusPtr = unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, buffer, count, remote_addr, rkey, param);
+        }
+    }
+
     // Check reentrancy guard
     if check_reentrancy_guard(FN_NAME) {
         return std::ptr::null_mut(); // UCS_OK
@@ -709,9 +750,13 @@ pub extern "C" fn ucp_put_nbx(
         endpoint: ep as u64,
         rkey: rkey as u64,
     };
-    if let Some(fault_result) =
-        handle_fault_injection(FN_NAME, call_num, &LOCAL_STATE.ucp_put_nbx_faults, &params)
-    {
+    if let Some(fault_result) = handle_fault_injection(
+        FN_NAME,
+        &LOCAL_STATE.hook_config.ucp_put_nbx_enabled,
+        call_num,
+        &LOCAL_STATE.ucp_put_nbx_faults,
+        &params,
+    ) {
         set_in_intercept(false);
         return fault_result;
     }
@@ -755,6 +800,20 @@ pub extern "C" fn ucp_put_nbx(
 pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsStatusPtr {
     const FN_NAME: &str = "ucp_ep_flush_nbx";
 
+    // FAST PATH: if fault injection is disabled globally, immediately call real function
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
+        let real_fn_ptr = get_real_function_ptr(
+            &REAL_UCP_EP_FLUSH_NBX,
+            try_find_real_ucp_ep_flush_nbx,
+            FN_NAME,
+        );
+        if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(UcpEpH, UcpRequestParamT) -> UcsStatusPtr =
+                unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(ep, param);
+        }
+    }
+
     // Check reentrancy guard
     if check_reentrancy_guard(FN_NAME) {
         return std::ptr::null_mut(); // UCS_OK
@@ -792,6 +851,7 @@ pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsSt
     };
     if let Some(fault_result) = handle_fault_injection(
         FN_NAME,
+        &LOCAL_STATE.hook_config.ucp_ep_flush_nbx_enabled,
         call_num,
         &LOCAL_STATE.ucp_ep_flush_nbx_faults,
         &params,

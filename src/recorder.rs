@@ -182,7 +182,7 @@ impl CallRecordBuffer {
         Self {
             write_index: AtomicU64::new(0),
             total_records: AtomicU64::new(0),
-            recording_enabled: AtomicU32::new(1), // enabled by default
+            recording_enabled: AtomicU32::new(0), // disabled by default for minimal overhead
             generation: AtomicU64::new(1),
             _reserved: [0; 4],
             records: UnsafeCell::new([EMPTY_RECORD; MAX_CALL_RECORDS]),
