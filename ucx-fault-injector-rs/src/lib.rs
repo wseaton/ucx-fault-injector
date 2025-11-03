@@ -1,12 +1,16 @@
 #![allow(dead_code)]
 
+pub mod atomic_utils;
 pub mod commands;
+pub mod function_ptr;
 pub mod init;
 pub mod intercept;
 pub mod recorder;
 pub mod state;
 pub mod strategy;
 pub mod subscriber;
+pub mod symbol_lookup;
+pub mod types;
 pub mod ucx;
 
 // version info from build-time git metadata (similar to setuptools_scm)
@@ -30,10 +34,12 @@ pub use commands::{Command, Response, State};
 pub use init::init_fault_injector;
 pub use intercept::ucp_get_nbx;
 pub use recorder::{
-    CallParams, CallRecord, CallRecordBuffer, RecordingSummary, SerializableCallRecord,
+    CallParams, CallRecord, CallRecordBuffer, RecordIterator, RecordingSummary,
+    SerializableCallRecord,
 };
 pub use strategy::FaultStrategy;
 pub use subscriber::{get_current_state, handle_command};
+pub use types::{ExportFormat, FaultPattern, HookName, PatternError, Probability};
 pub use ucx::*;
 
 // The fault injector will be initialized automatically via #[ctor] in production

@@ -313,3 +313,9 @@ impl FaultStrategy {
         }
     }
 }
+
+impl Default for FaultStrategy {
+    fn default() -> Self {
+        Self::new_random(2500) // 25%
+    }
+}

@@ -146,32 +146,36 @@ impl EnvConfig {
                     // sync lock-free error codes (up to MAX_LOCKFREE_ERROR_CODES)
                     let count = codes.len().min(crate::state::MAX_LOCKFREE_ERROR_CODES);
                     for (i, &code) in codes.iter().take(count).enumerate() {
-                        LOCAL_STATE.lockfree_error_codes[i].store(code, Ordering::Relaxed);
+                        LOCAL_STATE.lockfree_random.error_codes[i].store(code, Ordering::Relaxed);
                     }
                     LOCAL_STATE
-                        .lockfree_error_code_count
+                        .lockfree_random
+                        .error_code_count
                         .store(count, Ordering::Relaxed);
                 } else {
                     *strategy = FaultStrategy::new_random(prob);
                     info!(probability = prob, "configured random strategy from env");
 
                     // use default error codes
-                    LOCAL_STATE.lockfree_error_codes[0]
+                    LOCAL_STATE.lockfree_random.error_codes[0]
                         .store(crate::ucx::UCS_ERR_IO_ERROR, Ordering::Relaxed);
-                    LOCAL_STATE.lockfree_error_codes[1]
+                    LOCAL_STATE.lockfree_random.error_codes[1]
                         .store(crate::ucx::UCS_ERR_UNREACHABLE, Ordering::Relaxed);
-                    LOCAL_STATE.lockfree_error_codes[2]
+                    LOCAL_STATE.lockfree_random.error_codes[2]
                         .store(crate::ucx::UCS_ERR_TIMED_OUT, Ordering::Relaxed);
                     LOCAL_STATE
-                        .lockfree_error_code_count
+                        .lockfree_random
+                        .error_code_count
                         .store(3, Ordering::Relaxed);
                 }
                 // sync lock-free atomics
                 LOCAL_STATE
-                    .random_probability
+                    .lockfree_random
+                    .probability
                     .store(prob, Ordering::Relaxed);
                 LOCAL_STATE
-                    .use_lockfree_random
+                    .lockfree_random
+                    .enabled
                     .store(true, Ordering::Relaxed);
             }
             Some("pattern") => {
@@ -185,7 +189,8 @@ impl EnvConfig {
                         info!(pattern = %pattern, "configured pattern strategy from env");
                     }
                     LOCAL_STATE
-                        .use_lockfree_random
+                        .lockfree_random
+                        .enabled
                         .store(false, Ordering::Relaxed);
                 } else {
                     warn!("pattern strategy requested but no UCX_FAULT_PATTERN provided, using default random");

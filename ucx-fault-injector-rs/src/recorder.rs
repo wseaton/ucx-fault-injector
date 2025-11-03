@@ -280,97 +280,100 @@ impl CallRecordBuffer {
 
     /// Generate a pattern string from recorded calls
     pub fn generate_pattern(&self) -> String {
-        let total_records = self.total_records.load(Ordering::Relaxed);
-        if total_records == 0 {
-            return String::new();
-        }
-
-        let record_count = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
-        let mut pattern = String::with_capacity(record_count);
-
-        // determine starting position based on whether we've wrapped around
-        let start_index = if total_records as usize <= MAX_CALL_RECORDS {
-            0
-        } else {
-            (self.write_index.load(Ordering::Relaxed) % MAX_CALL_RECORDS as u64) as usize
-        };
-
-        // read records in chronological order
-        for i in 0..record_count {
-            let record_index = (start_index + i) % MAX_CALL_RECORDS;
-            let record = unsafe { (*self.records.get())[record_index] };
-
-            // only include records that have been written (sequence > 0)
-            if record.sequence > 0 {
-                pattern.push(record.to_pattern_char());
-            }
-        }
-
-        pattern
+        self.iter_records().map(|r| r.to_pattern_char()).collect()
     }
 
     /// Extract error codes used in recorded faults
     pub fn extract_error_codes(&self) -> Vec<i32> {
-        let total_records = self.total_records.load(Ordering::Relaxed);
-        if total_records == 0 {
-            return Vec::new();
-        }
-
-        let record_count = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
         let mut error_codes = Vec::new();
-
-        let start_index = if total_records as usize <= MAX_CALL_RECORDS {
-            0
-        } else {
-            (self.write_index.load(Ordering::Relaxed) % MAX_CALL_RECORDS as u64) as usize
-        };
-
-        for i in 0..record_count {
-            let record_index = (start_index + i) % MAX_CALL_RECORDS;
-            let record = unsafe { (*self.records.get())[record_index] };
-
-            if record.sequence > 0
-                && record.fault_injected
+        for record in self.iter_records() {
+            if record.fault_injected
                 && record.error_code != 0
                 && !error_codes.contains(&record.error_code)
             {
                 error_codes.push(record.error_code);
             }
         }
-
         error_codes
     }
 
     /// Get a snapshot of recent records for inspection
     pub fn get_recent_records(&self, count: usize) -> Vec<CallRecord> {
-        let total_records = self.total_records.load(Ordering::Relaxed);
-        if total_records == 0 {
-            return Vec::new();
+        self.iter_records()
+            .rev()
+            .take(count)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    pub fn iter_records(&self) -> RecordIterator<'_> {
+        RecordIterator::new(self)
+    }
+}
+
+pub struct RecordIterator<'a> {
+    buffer: &'a CallRecordBuffer,
+    current: usize,
+    remaining: usize,
+    start_index: usize,
+}
+
+impl<'a> RecordIterator<'a> {
+    fn new(buffer: &'a CallRecordBuffer) -> Self {
+        let total_records = buffer.total_records.load(Ordering::Relaxed);
+        let record_count = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
+
+        let start_index = if total_records as usize <= MAX_CALL_RECORDS {
+            0
+        } else {
+            (buffer.write_index.load(Ordering::Relaxed) % MAX_CALL_RECORDS as u64) as usize
+        };
+
+        Self {
+            buffer,
+            current: 0,
+            remaining: record_count,
+            start_index,
         }
+    }
+}
 
-        let available_records = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
-        let requested_count = std::cmp::min(count, available_records);
-        let mut records = Vec::with_capacity(requested_count);
+impl<'a> Iterator for RecordIterator<'a> {
+    type Item = CallRecord;
 
-        // get the most recent records
-        let current_write_pos = self.write_index.load(Ordering::Relaxed) as usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.remaining > 0 {
+            let record_index = (self.start_index + self.current) % MAX_CALL_RECORDS;
+            self.current += 1;
+            self.remaining -= 1;
 
-        for i in 0..requested_count {
-            let record_index = if current_write_pos > i {
-                (current_write_pos - i - 1) % MAX_CALL_RECORDS
-            } else {
-                (MAX_CALL_RECORDS + current_write_pos - i - 1) % MAX_CALL_RECORDS
-            };
-
-            let record = unsafe { (*self.records.get())[record_index] };
+            let record = unsafe { (*self.buffer.records.get())[record_index] };
             if record.sequence > 0 {
-                records.push(record);
+                return Some(record);
             }
         }
+        None
+    }
 
-        // reverse to get chronological order (oldest first)
-        records.reverse();
-        records
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
+    }
+}
+
+impl<'a> DoubleEndedIterator for RecordIterator<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        while self.remaining > 0 {
+            self.remaining -= 1;
+            let record_index = (self.start_index + self.remaining) % MAX_CALL_RECORDS;
+
+            let record = unsafe { (*self.buffer.records.get())[record_index] };
+            if record.sequence > 0 {
+                return Some(record);
+            }
+        }
+        None
     }
 }
 
@@ -451,28 +454,8 @@ impl CallRecordBuffer {
             return CallRecordBackup::empty();
         }
 
-        let record_count = std::cmp::min(total_records as usize, MAX_CALL_RECORDS);
-        let mut backed_up_records = Vec::with_capacity(record_count);
-
-        // determine starting position for chronological order
-        let start_index = if total_records as usize <= MAX_CALL_RECORDS {
-            0
-        } else {
-            (self.write_index.load(Ordering::Relaxed) % MAX_CALL_RECORDS as u64) as usize
-        };
-
-        // copy records in chronological order
-        for i in 0..record_count {
-            let record_index = (start_index + i) % MAX_CALL_RECORDS;
-            let record = unsafe { (*self.records.get())[record_index] };
-
-            if record.sequence > 0 {
-                backed_up_records.push(record);
-            }
-        }
-
         CallRecordBackup {
-            records: backed_up_records,
+            records: self.iter_records().collect(),
             total_records,
             write_index: self.write_index.load(Ordering::Relaxed),
             recording_enabled: self.recording_enabled.load(Ordering::Relaxed),
