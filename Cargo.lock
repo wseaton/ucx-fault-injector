@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "ucx-fault-injector"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "bindgen",
  "clap",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "ucx-fault-injector-macros"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
