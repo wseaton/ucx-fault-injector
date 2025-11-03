@@ -2,13 +2,13 @@
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
-use crate::commands::Command;
+use crate::fault::FaultStrategy;
+#[cfg(test)]
+use crate::ipc::Command;
+#[cfg(test)]
+use crate::ipc::{get_current_state, handle_command};
 #[cfg(test)]
 use crate::state::LOCAL_STATE;
-#[cfg(test)]
-use crate::strategy::FaultStrategy;
-#[cfg(test)]
-use crate::subscriber::{get_current_state, handle_command};
 #[cfg(test)]
 use crate::ucx::*;
 
@@ -58,7 +58,7 @@ fn test_ucp_get_nbx_mock() {
     // to avoid expensive library search during testing
 
     // Test with fault injection disabled
-    assert!(crate::intercept::should_inject_fault().is_none());
+    assert!(crate::interception::should_inject_fault().is_none());
 
     // Enable fault injection
     LOCAL_STATE.enabled.store(true, Ordering::Relaxed);
@@ -72,7 +72,7 @@ fn test_ucp_get_nbx_mock() {
 
     // Test fault injection logic
     assert_eq!(
-        crate::intercept::should_inject_fault_for_function("ucp_get_nbx"),
+        crate::interception::should_inject_fault_for_function("ucp_get_nbx"),
         Some(UCS_ERR_UNREACHABLE)
     );
 }
@@ -190,7 +190,7 @@ fn test_socket_protocol_serialization() {
 
 #[test]
 fn test_socket_protocol_response() {
-    use crate::commands::Response;
+    use crate::ipc::Response;
     use std::io::{BufRead, BufReader, Write};
 
     // create a test response

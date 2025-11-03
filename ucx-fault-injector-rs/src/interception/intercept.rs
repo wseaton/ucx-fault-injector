@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use tracing::{debug, warn};
 use ucx_fault_injector_macros::ucx_interceptor;
 
+use super::symbol_lookup::find_real_ucx_function;
+use crate::ipc::get_current_state;
 use crate::recorder::{CallParams, FunctionType};
 use crate::state::{is_in_intercept, DEBUG_ENABLED, LOCAL_STATE};
-use crate::subscriber::get_current_state;
-use crate::symbol_lookup::find_real_ucx_function;
 use crate::ucx::{ucs_status_to_ptr, UcpEpH, UcpRequestParamT, UcpRkeyH, UcsStatus, UcsStatusPtr};
 
 // function pointers to real UCX functions - use atomic pointer to avoid deadlock

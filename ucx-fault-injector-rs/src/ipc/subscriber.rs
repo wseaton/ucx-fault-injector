@@ -3,11 +3,11 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use tracing::{error, info, warn};
 
-use crate::atomic_utils::sync_lockfree_error_codes;
-use crate::commands::{Command, HookConfig, Response, State};
+use super::commands::{Command, HookConfig, Response, State};
+use crate::fault::{FaultStrategy, SelectionMethod};
 use crate::recorder::SerializableCallRecord;
+use crate::state::sync_lockfree_error_codes;
 use crate::state::LOCAL_STATE;
-use crate::strategy::{FaultStrategy, SelectionMethod};
 use crate::types::{ExportFormat, FaultPattern, HookName, Probability};
 
 // sync lock-free atomics with strategy state for hot path optimization

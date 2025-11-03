@@ -1,4 +1,4 @@
-use crate::recorder::{CallRecordBackup, CallRecordBuffer};
+use crate::recorder::CallRecordBuffer;
 use libc::c_void;
 use nix::fcntl::OFlag;
 use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
@@ -57,8 +57,6 @@ pub struct SharedFaultState {
 
 impl SharedFaultState {
     const fn new() -> Self {
-        const ATOMIC_I32_INIT: AtomicI32 = AtomicI32::new(0);
-
         Self {
             magic: AtomicU64::new(MAGIC_NUMBER),
             version: AtomicU32::new(VERSION),
@@ -70,7 +68,16 @@ impl SharedFaultState {
             probability: AtomicU32::new(2500), // default 25% (scaled: 25.00 * 100)
             strategy_type: AtomicU32::new(0),  // Default to Random
             pattern_position: AtomicU64::new(0),
-            error_codes: [ATOMIC_I32_INIT; 8],
+            error_codes: [
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+            ],
             error_codes_len: AtomicU32::new(0),
             pattern_lock: AtomicBool::new(false),
             pattern: [0u8; 256],
@@ -207,8 +214,8 @@ impl SharedFaultState {
     pub fn set_error_codes(&self, codes: &[i32]) {
         let count = std::cmp::min(codes.len(), self.error_codes.len());
 
-        for i in 0..count {
-            self.error_codes[i].store(codes[i], Ordering::Relaxed);
+        for (i, &code) in codes.iter().enumerate().take(count) {
+            self.error_codes[i].store(code, Ordering::Relaxed);
         }
 
         // Clear remaining slots
@@ -368,12 +375,14 @@ impl Drop for SharedStateManager {
         }
 
         // Unmap the memory from this process (always safe)
-        if let Err(_) = unsafe {
+        if unsafe {
             munmap(
                 std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void),
                 self.size,
             )
-        } {
+        }
+        .is_err()
+        {
             // Silent failure during cleanup to avoid logging issues during destruction
         }
 
@@ -396,7 +405,7 @@ pub fn get_shared_state() -> Option<&'static SharedFaultState> {
 }
 
 pub fn init_shared_state() -> Result<(), Box<dyn std::error::Error>> {
-    SHARED_STATE_MANAGER.get_or_try_init(|| SharedStateManager::new())?;
+    SHARED_STATE_MANAGER.get_or_try_init(SharedStateManager::new)?;
     info!("shared state initialized successfully");
     Ok(())
 }

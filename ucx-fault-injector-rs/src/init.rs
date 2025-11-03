@@ -4,10 +4,12 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::Ordering;
 use tracing::{debug, error, info, warn};
 
-use crate::intercept::{init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx};
+use crate::fault::FaultStrategy;
+use crate::interception::{
+    init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx,
+};
+use crate::ipc::{get_current_state, start_file_watcher, start_socket_server};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
-use crate::strategy::FaultStrategy;
-use crate::subscriber::{get_current_state, start_file_watcher, start_socket_server};
 use crate::version_info;
 
 // environment variable configuration

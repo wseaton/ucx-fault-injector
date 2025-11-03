@@ -174,12 +174,12 @@ pub fn ucx_interceptor(args: TokenStream, input: TokenStream) -> TokenStream {
                     FN_NAME,
                     call_num
                 );
-                crate::intercept::log_debug_info_if_enabled_internal(call_num);
+                crate::interception::log_debug_info_if_enabled_internal(call_num);
             }
 
             // build params and check for fault injection
             let params = #build_params_body;
-            if let Some(error_code) = crate::intercept::should_inject_fault_for_hook(&#hook_enabled)
+            if let Some(error_code) = crate::interception::should_inject_fault_for_hook(&#hook_enabled)
             {
                 // fault injection path
                 crate::state::LOCAL_STATE

@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize
 use std::sync::Mutex;
 use tracing::info;
 
+use crate::fault::FaultStrategy;
 use crate::recorder::CallRecordBuffer;
-use crate::strategy::FaultStrategy;
 use crate::types::HookName;
 
 // configuration for which UCX function hooks are enabled (using atomics for lock-free access)

@@ -1,17 +1,17 @@
 #![allow(dead_code)]
 
-pub mod atomic_utils;
-pub mod commands;
-pub mod function_ptr;
+// module organization
+pub mod fault;
 pub mod init;
-pub mod intercept;
+pub mod interception;
+pub mod ipc;
 pub mod recorder;
 pub mod state;
-pub mod strategy;
-pub mod subscriber;
-pub mod symbol_lookup;
 pub mod types;
 pub mod ucx;
+
+#[cfg(test)]
+mod tests;
 
 // version info from build-time git metadata (similar to setuptools_scm)
 pub fn version_info() -> String {
@@ -26,21 +26,14 @@ pub fn version_info() -> String {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
-// Re-export key types and functions for external use
-pub use commands::{Command, Response, State};
+// re-export key types and functions for external use
+pub use fault::FaultStrategy;
 pub use init::init_fault_injector;
-pub use intercept::ucp_get_nbx;
+pub use interception::ucp_get_nbx;
+pub use ipc::{get_current_state, handle_command, Command, Response, State};
 pub use recorder::{
     CallParams, CallRecord, CallRecordBuffer, RecordIterator, RecordingSummary,
     SerializableCallRecord,
 };
-pub use strategy::FaultStrategy;
-pub use subscriber::{get_current_state, handle_command};
 pub use types::{ExportFormat, FaultPattern, HookName, PatternError, Probability};
 pub use ucx::*;
-
-// The fault injector will be initialized automatically via #[ctor] in production
-// Tests can call init_fault_injector() manually if needed
