@@ -60,7 +60,7 @@ lint:
 check: fmt lint build
 
 # Bump version (patch, minor, or major) and create release
-bump level="patch":
+bump level="patch" dry_run="false":
     #!/usr/bin/env bash
     set -e
 
@@ -70,30 +70,45 @@ bump level="patch":
         cargo install cargo-edit
     fi
 
-    # get current version
-    OLD_VERSION=$(grep -m1 'version = ' Cargo.toml | cut -d'"' -f2)
+    # get current version from workspace
+    OLD_VERSION=$(awk '/^\[workspace.package\]/,/^version = / {if (/^version = /) {print $3; exit}}' Cargo.toml | tr -d '"')
     echo "Current version: ${OLD_VERSION}"
 
-    # bump version based on level
-    cargo set-version --bump {{level}}
+    if [ "{{dry_run}}" = "true" ]; then
+        echo "🔍 DRY RUN - no changes will be committed"
+        echo ""
+    fi
 
-    # get new version
-    NEW_VERSION=$(grep -m1 'version = ' Cargo.toml | cut -d'"' -f2)
+    # bump version for all workspace members
+    cargo set-version --workspace --bump {{level}}
+
+    # get new version from workspace
+    NEW_VERSION=$(awk '/^\[workspace.package\]/,/^version = / {if (/^version = /) {print $3; exit}}' Cargo.toml | tr -d '"')
     TAG="v${NEW_VERSION}"
 
     echo "Bumped version: ${OLD_VERSION} → ${NEW_VERSION}"
 
-    # commit changes
-    git add Cargo.toml Cargo.lock
-    git commit -m "bump version to ${NEW_VERSION}"
+    if [ "{{dry_run}}" = "true" ]; then
+        echo ""
+        echo "Files that would be committed:"
+        git diff --name-only
+        echo ""
+        echo "🔄 Reverting changes (dry run)..."
+        git checkout Cargo.toml */Cargo.toml Cargo.lock 2>/dev/null || true
+        echo "✅ Dry run complete - no changes were committed"
+    else
+        # commit changes (both workspace and member Cargo.toml files get updated)
+        git add Cargo.toml */Cargo.toml Cargo.lock
+        git commit -m "bump version to ${NEW_VERSION}"
 
-    # create and push tag
-    git tag -a "${TAG}" -m "Release ${TAG}"
+        # create and push tag
+        git tag -a "${TAG}" -m "Release ${TAG}"
 
-    echo "✅ Version bumped to ${NEW_VERSION}"
-    echo "✅ Changes committed and tagged as ${TAG}"
-    echo ""
-    echo "Push with: git push && git push origin ${TAG}"
+        echo "✅ Version bumped to ${NEW_VERSION}"
+        echo "✅ Changes committed and tagged as ${TAG}"
+        echo ""
+        echo "Push with: git push && git push origin ${TAG}"
+    fi
 
 # Show help for signal-based fault control
 help-signals:
