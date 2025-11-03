@@ -1,1 +1,13 @@
+# workspace target directory
 /target
+
+# crate-specific target directories (if built individually)
+ucx-fault-injector-rs/target
+ucx-fault-injector-macros/target
+
+# rust build artifacts
+**/*.rs.bk
+
+# ignore crate-level Cargo.lock (keep workspace root Cargo.lock)
+ucx-fault-injector-rs/Cargo.lock
+ucx-fault-injector-macros/Cargo.lock

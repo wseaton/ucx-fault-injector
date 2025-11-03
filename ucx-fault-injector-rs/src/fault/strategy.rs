@@ -129,7 +129,8 @@ impl FaultStrategy {
                     .unwrap()
                     .as_nanos()
                     .hash(&mut hasher);
-                let random = (hasher.finish() % 100) as u32;
+                // use 0-9999 range for 0.01% precision
+                let random = (hasher.finish() % 10000) as u32;
 
                 if random < *probability {
                     // randomly select an error code from the pool
@@ -278,6 +279,22 @@ impl FaultStrategy {
             SelectionMethod::Random { .. } => "random",
             SelectionMethod::Pattern { .. } => "pattern",
             SelectionMethod::Replay { .. } => "replay",
+        }
+    }
+}
+
+impl Default for FaultStrategy {
+    fn default() -> Self {
+        Self::new_random(2500) // 25%
+    }
+}
+
+impl FaultStrategy {
+    #[cfg(test)]
+    pub const fn new_const() -> Self {
+        Self {
+            error_codes: vec![],
+            selection_method: SelectionMethod::Random { probability: 2500 },
         }
     }
 }

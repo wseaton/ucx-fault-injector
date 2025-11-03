@@ -23,7 +23,7 @@ pub struct Response {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct State {
     pub enabled: bool,
-    pub probability: u32,
+    pub probability: f64, // real percentage 0.0-100.0 for display
     pub strategy: String,
     pub pattern: Option<String>,
     pub error_codes: Vec<i32>,
@@ -31,6 +31,19 @@ pub struct State {
     pub total_recorded_calls: u64,
     pub recorded_pattern_length: usize,
     pub hook_config: HookConfig,
+
+    // aggregate statistics
+    pub total_calls: u64,
+    pub faults_injected: u64,
+    pub calls_since_fault: u64,
+
+    // per-function statistics
+    pub ucp_get_nbx_calls: u64,
+    pub ucp_get_nbx_faults: u64,
+    pub ucp_put_nbx_calls: u64,
+    pub ucp_put_nbx_faults: u64,
+    pub ucp_ep_flush_nbx_calls: u64,
+    pub ucp_ep_flush_nbx_faults: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

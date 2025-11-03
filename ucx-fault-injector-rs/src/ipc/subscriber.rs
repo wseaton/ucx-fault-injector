@@ -1,13 +1,37 @@
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::thread;
 use tracing::{error, info, warn};
 
-use crate::commands::{Command, HookConfig, Response, State};
+use super::commands::{Command, HookConfig, Response, State};
+use crate::fault::{FaultStrategy, SelectionMethod};
 use crate::recorder::SerializableCallRecord;
+use crate::state::sync_lockfree_error_codes;
 use crate::state::LOCAL_STATE;
-use crate::strategy::FaultStrategy;
+use crate::types::{ExportFormat, FaultPattern, HookName, Probability};
 
-// shared state removed - local state only
+// sync lock-free atomics with strategy state for hot path optimization
+pub(crate) fn sync_lockfree_strategy(strategy: &FaultStrategy) {
+    match &strategy.selection_method {
+        SelectionMethod::Random { probability } => {
+            LOCAL_STATE
+                .lockfree_random
+                .probability
+                .store(*probability, Ordering::Relaxed);
+            LOCAL_STATE
+                .lockfree_random
+                .enabled
+                .store(true, Ordering::Relaxed);
+        }
+        _ => {
+            // pattern/replay strategies need mutex, disable lock-free path
+            LOCAL_STATE
+                .lockfree_random
+                .enabled
+                .store(false, Ordering::Relaxed);
+        }
+    }
+}
 
 // Socket server functions for fault control
 pub fn get_current_state() -> State {
@@ -17,16 +41,24 @@ pub fn get_current_state() -> State {
     let total_calls = LOCAL_STATE.call_recorder.get_total_records();
     let pattern_length = LOCAL_STATE.call_recorder.generate_pattern().len();
 
-    let hook_config = LOCAL_STATE.hook_config.lock().unwrap();
     let hook_config_state = HookConfig {
-        ucp_get_nbx_enabled: hook_config.ucp_get_nbx_enabled,
-        ucp_put_nbx_enabled: hook_config.ucp_put_nbx_enabled,
-        ucp_ep_flush_nbx_enabled: hook_config.ucp_ep_flush_nbx_enabled,
+        ucp_get_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_get_nbx_enabled
+            .load(Ordering::Relaxed),
+        ucp_put_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_put_nbx_enabled
+            .load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_enabled: LOCAL_STATE
+            .hook_config
+            .ucp_ep_flush_nbx_enabled
+            .load(Ordering::Relaxed),
     };
 
     State {
         enabled: LOCAL_STATE.enabled.load(Ordering::Relaxed),
-        probability: strategy.get_probability().unwrap_or(0),
+        probability: strategy.get_probability().unwrap_or(0) as f64 / 100.0, // unscale for display
         strategy: strategy.get_strategy_name().to_string(),
         pattern: strategy.get_pattern().map(|s| s.to_string()),
         error_codes: strategy.get_error_codes().to_vec(),
@@ -34,6 +66,25 @@ pub fn get_current_state() -> State {
         total_recorded_calls: total_calls,
         recorded_pattern_length: pattern_length,
         hook_config: hook_config_state,
+
+        // aggregate statistics
+        total_calls: LOCAL_STATE.stats.total_calls.load(Ordering::Relaxed),
+        faults_injected: LOCAL_STATE.stats.faults_injected.load(Ordering::Relaxed),
+        calls_since_fault: LOCAL_STATE.stats.calls_since_fault.load(Ordering::Relaxed),
+
+        // per-function statistics
+        ucp_get_nbx_calls: LOCAL_STATE.stats.ucp_get_nbx_calls.load(Ordering::Relaxed),
+        ucp_get_nbx_faults: LOCAL_STATE.stats.ucp_get_nbx_faults.load(Ordering::Relaxed),
+        ucp_put_nbx_calls: LOCAL_STATE.stats.ucp_put_nbx_calls.load(Ordering::Relaxed),
+        ucp_put_nbx_faults: LOCAL_STATE.stats.ucp_put_nbx_faults.load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_calls: LOCAL_STATE
+            .stats
+            .ucp_ep_flush_nbx_calls
+            .load(Ordering::Relaxed),
+        ucp_ep_flush_nbx_faults: LOCAL_STATE
+            .stats
+            .ucp_ep_flush_nbx_faults
+            .load(Ordering::Relaxed),
     }
 }
 
@@ -43,6 +94,7 @@ pub fn handle_command(cmd: Command) -> Response {
             let current = LOCAL_STATE.enabled.load(Ordering::Relaxed);
             let new_state = !current;
             LOCAL_STATE.enabled.store(new_state, Ordering::Relaxed);
+            #[cfg(not(test))]
             info!(enabled = new_state, "fault injection toggled");
             Response {
                 status: "ok".to_string(),
@@ -56,25 +108,27 @@ pub fn handle_command(cmd: Command) -> Response {
         }
         "set_probability" => {
             if let Some(value) = cmd.value {
-                if (0.0..=100.0).contains(&value) {
-                    let probability_u32 = value as u32;
-                    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_probability(probability_u32);
-                    drop(strategy);
-                    info!(probability = value, "probability set");
-                    Response {
-                        status: "ok".to_string(),
-                        message: format!("Probability set to {}%", value),
-                        state: Some(get_current_state()),
-                        recording_data: None,
+                match Probability::from_percentage(value) {
+                    Ok(prob) => {
+                        let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                        strategy.set_probability(prob.scaled());
+                        sync_lockfree_strategy(&strategy);
+                        drop(strategy);
+                        #[cfg(not(test))]
+                        info!(probability = %prob, "probability set");
+                        Response {
+                            status: "ok".to_string(),
+                            message: format!("Probability set to {}", prob),
+                            state: Some(get_current_state()),
+                            recording_data: None,
+                        }
                     }
-                } else {
-                    Response {
+                    Err(err) => Response {
                         status: "error".to_string(),
-                        message: "Invalid probability. Must be 0.0-100.0".to_string(),
+                        message: err.to_string(),
                         state: None,
                         recording_data: None,
-                    }
+                    },
                 }
             } else {
                 Response {
@@ -88,9 +142,9 @@ pub fn handle_command(cmd: Command) -> Response {
         "reset" => {
             LOCAL_STATE.enabled.store(false, Ordering::Relaxed);
 
-            // Reset strategy to random with default probability
             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-            *strategy = FaultStrategy::new_random(25);
+            *strategy = FaultStrategy::default();
+            sync_lockfree_strategy(&strategy);
             drop(strategy);
 
             info!("reset to defaults");
@@ -102,17 +156,18 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "set_strategy" => {
-            if let Some(pattern) = cmd.pattern {
+            if let Some(pattern_str) = cmd.pattern {
                 let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                 let error_codes = cmd.error_codes.unwrap_or_default();
 
-                if pattern == "random" {
-                    let current_prob = strategy.get_probability().unwrap_or(25);
+                if pattern_str == "random" {
+                    let current_prob = strategy.get_probability().unwrap_or(2500);
                     if error_codes.is_empty() {
                         *strategy = FaultStrategy::new_random(current_prob);
                     } else {
                         *strategy = FaultStrategy::new_random_with_codes(current_prob, error_codes);
                     }
+                    sync_lockfree_strategy(&strategy);
                     drop(strategy);
                     info!("switched to random fault strategy");
                     Response {
@@ -121,27 +176,33 @@ pub fn handle_command(cmd: Command) -> Response {
                         state: Some(get_current_state()),
                         recording_data: None,
                     }
-                } else if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
-                    if error_codes.is_empty() {
-                        *strategy = FaultStrategy::new_pattern(pattern.clone());
-                    } else {
-                        *strategy =
-                            FaultStrategy::new_pattern_with_codes(pattern.clone(), error_codes);
-                    }
-                    drop(strategy);
-                    info!(pattern = %pattern, "switched to pattern fault strategy");
-                    Response {
-                        status: "ok".to_string(),
-                        message: format!("Strategy set to pattern: {}", pattern),
-                        state: Some(get_current_state()),
-                        recording_data: None,
-                    }
                 } else {
-                    Response {
-                        status: "error".to_string(),
-                        message: "Invalid pattern. Use 'random' or a pattern with only 'X' (fault) and 'O' (pass) characters".to_string(),
-                        state: None,
-                        recording_data: None,
+                    match FaultPattern::new(pattern_str.clone()) {
+                        Ok(pattern) => {
+                            if error_codes.is_empty() {
+                                *strategy = FaultStrategy::new_pattern(pattern.into_inner());
+                            } else {
+                                *strategy = FaultStrategy::new_pattern_with_codes(
+                                    pattern.into_inner(),
+                                    error_codes,
+                                );
+                            }
+                            sync_lockfree_strategy(&strategy);
+                            drop(strategy);
+                            info!(pattern = %pattern_str, "switched to pattern fault strategy");
+                            Response {
+                                status: "ok".to_string(),
+                                message: format!("Strategy set to pattern: {}", pattern_str),
+                                state: Some(get_current_state()),
+                                recording_data: None,
+                            }
+                        }
+                        Err(err) => Response {
+                            status: "error".to_string(),
+                            message: format!("Invalid pattern: {}", err),
+                            state: None,
+                            recording_data: None,
+                        },
                     }
                 }
             } else {
@@ -165,9 +226,18 @@ pub fn handle_command(cmd: Command) -> Response {
                     Ok(codes) => {
                         let error_codes = {
                             let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                            strategy.set_error_codes(codes);
+                            strategy.set_error_codes(codes.clone());
                             let result = strategy.get_error_codes().to_vec();
                             drop(strategy);
+
+                            // sync lock-free error codes for random strategy
+                            sync_lockfree_error_codes(
+                                &codes,
+                                &LOCAL_STATE.lockfree_random.enabled,
+                                &LOCAL_STATE.lockfree_random.error_codes,
+                                &LOCAL_STATE.lockfree_random.error_code_count,
+                            );
+
                             result
                         };
                         info!(error_codes = ?error_codes, "error codes updated");
@@ -191,9 +261,18 @@ pub fn handle_command(cmd: Command) -> Response {
                 // Legacy support for error_codes field
                 let error_codes = {
                     let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_error_codes(codes);
+                    strategy.set_error_codes(codes.clone());
                     let result = strategy.get_error_codes().to_vec();
                     drop(strategy);
+
+                    // sync lock-free error codes for random strategy
+                    sync_lockfree_error_codes(
+                        &codes,
+                        &LOCAL_STATE.lockfree_random.enabled,
+                        &LOCAL_STATE.lockfree_random.error_codes,
+                        &LOCAL_STATE.lockfree_random.error_code_count,
+                    );
+
                     result
                 };
                 info!(error_codes = ?error_codes, "error codes updated");
@@ -227,11 +306,11 @@ pub fn handle_command(cmd: Command) -> Response {
                  - ucp_get_nbx calls: {}\n\
                  - ucp_get_nbx faults: {}",
                 std::process::id(),
-                LOCAL_STATE.total_calls.load(Ordering::Relaxed),
-                LOCAL_STATE.faults_injected.load(Ordering::Relaxed),
-                LOCAL_STATE.calls_since_fault.load(Ordering::Relaxed),
-                LOCAL_STATE.ucp_get_nbx_calls.load(Ordering::Relaxed),
-                LOCAL_STATE.ucp_get_nbx_faults.load(Ordering::Relaxed),
+                LOCAL_STATE.stats.total_calls.load(Ordering::Relaxed),
+                LOCAL_STATE.stats.faults_injected.load(Ordering::Relaxed),
+                LOCAL_STATE.stats.calls_since_fault.load(Ordering::Relaxed),
+                LOCAL_STATE.stats.ucp_get_nbx_calls.load(Ordering::Relaxed),
+                LOCAL_STATE.stats.ucp_get_nbx_faults.load(Ordering::Relaxed),
             );
             Response {
                 status: "ok".to_string(),
@@ -266,10 +345,14 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "dump_recording" => {
-            let format = cmd.export_format.as_deref().unwrap_or("summary");
+            let format = cmd
+                .export_format
+                .as_deref()
+                .and_then(|s| ExportFormat::from_str(s).ok())
+                .unwrap_or_default();
 
             let recording_data = match format {
-                "pattern" => {
+                ExportFormat::Pattern => {
                     let pattern = LOCAL_STATE.call_recorder.generate_pattern();
                     let error_codes = LOCAL_STATE.call_recorder.extract_error_codes();
                     serde_json::json!({
@@ -278,7 +361,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         "total_calls": LOCAL_STATE.call_recorder.get_total_records()
                     })
                 }
-                "records" => {
+                ExportFormat::Records => {
                     let count = cmd.value.unwrap_or(100.0) as usize;
                     let records: Vec<SerializableCallRecord> = LOCAL_STATE
                         .call_recorder
@@ -291,11 +374,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         "total_count": records.len()
                     })
                 }
-                "summary" => {
-                    let summary = LOCAL_STATE.call_recorder.generate_summary();
-                    serde_json::to_value(summary).unwrap_or(serde_json::json!({}))
-                }
-                _ => {
+                ExportFormat::Summary => {
                     let summary = LOCAL_STATE.call_recorder.generate_summary();
                     serde_json::to_value(summary).unwrap_or(serde_json::json!({}))
                 }
@@ -343,6 +422,7 @@ pub fn handle_command(cmd: Command) -> Response {
                 let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
                 *strategy =
                     FaultStrategy::from_recorded_pattern(pattern.clone(), error_codes.clone());
+                sync_lockfree_strategy(&strategy);
                 drop(strategy);
 
                 info!(pattern = %pattern, error_codes = ?error_codes, "replaying recorded pattern");
@@ -363,26 +443,27 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "set_pattern" => {
-            if let Some(pattern) = cmd.pattern {
-                if !pattern.is_empty() && pattern.chars().all(|c| c == 'X' || c == 'O') {
-                    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-                    strategy.set_pattern(pattern.clone());
-                    drop(strategy);
-                    info!(pattern = %pattern, "pattern updated");
-                    Response {
-                        status: "ok".to_string(),
-                        message: format!("Pattern set to: {}", pattern),
-                        state: Some(get_current_state()),
-                        recording_data: None,
+            if let Some(pattern_str) = cmd.pattern {
+                match FaultPattern::new(pattern_str.clone()) {
+                    Ok(pattern) => {
+                        let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+                        strategy.set_pattern(pattern.into_inner());
+                        sync_lockfree_strategy(&strategy);
+                        drop(strategy);
+                        info!(pattern = %pattern_str, "pattern updated");
+                        Response {
+                            status: "ok".to_string(),
+                            message: format!("Pattern set to: {}", pattern_str),
+                            state: Some(get_current_state()),
+                            recording_data: None,
+                        }
                     }
-                } else {
-                    Response {
+                    Err(err) => Response {
                         status: "error".to_string(),
-                        message: "Invalid pattern. Use only 'X' (fault) and 'O' (pass) characters"
-                            .to_string(),
+                        message: format!("Invalid pattern: {}", err),
                         state: None,
                         recording_data: None,
-                    }
+                    },
                 }
             } else {
                 Response {
@@ -394,42 +475,24 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "enable_hook" => {
-            if let Some(hook_name) = cmd.hook_name {
-                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
-                let result = match hook_name.as_str() {
-                    "ucp_get_nbx" => {
-                        hook_config.ucp_get_nbx_enabled = true;
-                        "ucp_get_nbx hook enabled"
-                    }
-                    "ucp_put_nbx" => {
-                        hook_config.ucp_put_nbx_enabled = true;
-                        "ucp_put_nbx hook enabled"
-                    }
-                    "ucp_ep_flush_nbx" => {
-                        hook_config.ucp_ep_flush_nbx_enabled = true;
-                        "ucp_ep_flush_nbx hook enabled"
-                    }
-                    "all" => {
-                        hook_config.ucp_get_nbx_enabled = true;
-                        hook_config.ucp_put_nbx_enabled = true;
-                        hook_config.ucp_ep_flush_nbx_enabled = true;
-                        "all hooks enabled"
-                    }
-                    _ => {
-                        return Response {
-                            status: "error".to_string(),
-                            message: format!("Unknown hook name: {}. Valid options: ucp_get_nbx, ucp_put_nbx, ucp_ep_flush_nbx, all", hook_name),
-                            state: None,
+            if let Some(hook_name_str) = cmd.hook_name {
+                match HookName::from_str(&hook_name_str) {
+                    Ok(hook_name) => {
+                        LOCAL_STATE.hook_config.enable_hook(hook_name);
+                        info!(hook_name = %hook_name, "hook enabled");
+                        Response {
+                            status: "ok".to_string(),
+                            message: format!("{} hook(s) enabled", hook_name),
+                            state: Some(get_current_state()),
                             recording_data: None,
-                        };
+                        }
                     }
-                };
-                info!(hook_name = hook_name, "hook enabled");
-                Response {
-                    status: "ok".to_string(),
-                    message: result.to_string(),
-                    state: Some(get_current_state()),
-                    recording_data: None,
+                    Err(err) => Response {
+                        status: "error".to_string(),
+                        message: err,
+                        state: None,
+                        recording_data: None,
+                    },
                 }
             } else {
                 Response {
@@ -441,42 +504,24 @@ pub fn handle_command(cmd: Command) -> Response {
             }
         }
         "disable_hook" => {
-            if let Some(hook_name) = cmd.hook_name {
-                let mut hook_config = LOCAL_STATE.hook_config.lock().unwrap();
-                let result = match hook_name.as_str() {
-                    "ucp_get_nbx" => {
-                        hook_config.ucp_get_nbx_enabled = false;
-                        "ucp_get_nbx hook disabled"
-                    }
-                    "ucp_put_nbx" => {
-                        hook_config.ucp_put_nbx_enabled = false;
-                        "ucp_put_nbx hook disabled"
-                    }
-                    "ucp_ep_flush_nbx" => {
-                        hook_config.ucp_ep_flush_nbx_enabled = false;
-                        "ucp_ep_flush_nbx hook disabled"
-                    }
-                    "all" => {
-                        hook_config.ucp_get_nbx_enabled = false;
-                        hook_config.ucp_put_nbx_enabled = false;
-                        hook_config.ucp_ep_flush_nbx_enabled = false;
-                        "all hooks disabled"
-                    }
-                    _ => {
-                        return Response {
-                            status: "error".to_string(),
-                            message: format!("Unknown hook name: {}. Valid options: ucp_get_nbx, ucp_put_nbx, ucp_ep_flush_nbx, all", hook_name),
-                            state: None,
+            if let Some(hook_name_str) = cmd.hook_name {
+                match HookName::from_str(&hook_name_str) {
+                    Ok(hook_name) => {
+                        LOCAL_STATE.hook_config.disable_hook(hook_name);
+                        info!(hook_name = %hook_name, "hook disabled");
+                        Response {
+                            status: "ok".to_string(),
+                            message: format!("{} hook(s) disabled", hook_name),
+                            state: Some(get_current_state()),
                             recording_data: None,
-                        };
+                        }
                     }
-                };
-                info!(hook_name = hook_name, "hook disabled");
-                Response {
-                    status: "ok".to_string(),
-                    message: result.to_string(),
-                    state: Some(get_current_state()),
-                    recording_data: None,
+                    Err(err) => Response {
+                        status: "error".to_string(),
+                        message: err,
+                        state: None,
+                        recording_data: None,
+                    },
                 }
             } else {
                 Response {

@@ -1,4 +1,4 @@
-use crate::recorder::{CallRecordBackup, CallRecordBuffer};
+use crate::recorder::CallRecordBuffer;
 use libc::c_void;
 use nix::fcntl::OFlag;
 use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
@@ -26,7 +26,7 @@ pub struct SharedFaultState {
 
     // Fault injection configuration (updated via ZMQ)
     pub enabled: AtomicBool,         // Global enable/disable
-    pub probability: AtomicU32,      // Fault probability 0-100
+    pub probability: AtomicU32,      // Fault probability 0-10000 (scaled, 0.01% precision)
     pub strategy_type: AtomicU32,    // 0=Random, 1=Pattern
     pub pattern_position: AtomicU64, // Current position in pattern (for pattern strategy)
     pub error_codes: [AtomicI32; 8], // Supported error codes (UCS_ERR_*)
@@ -57,8 +57,6 @@ pub struct SharedFaultState {
 
 impl SharedFaultState {
     const fn new() -> Self {
-        const ATOMIC_I32_INIT: AtomicI32 = AtomicI32::new(0);
-
         Self {
             magic: AtomicU64::new(MAGIC_NUMBER),
             version: AtomicU32::new(VERSION),
@@ -67,10 +65,19 @@ impl SharedFaultState {
             last_writer_pid: AtomicI32::new(0),
             last_update_time: AtomicU64::new(0),
             enabled: AtomicBool::new(false),
-            probability: AtomicU32::new(25),
-            strategy_type: AtomicU32::new(0), // Default to Random
+            probability: AtomicU32::new(2500), // default 25% (scaled: 25.00 * 100)
+            strategy_type: AtomicU32::new(0),  // Default to Random
             pattern_position: AtomicU64::new(0),
-            error_codes: [ATOMIC_I32_INIT; 8],
+            error_codes: [
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+            ],
             error_codes_len: AtomicU32::new(0),
             pattern_lock: AtomicBool::new(false),
             pattern: [0u8; 256],
@@ -121,7 +128,7 @@ impl SharedFaultState {
     pub fn reset_to_defaults(&self) {
         info!("resetting shared state to defaults due to stale data");
         self.enabled.store(false, Ordering::Relaxed);
-        self.probability.store(25, Ordering::Relaxed);
+        self.probability.store(2500, Ordering::Relaxed); // 25% (scaled)
         self.strategy_type.store(0, Ordering::Relaxed); // Random
         self.pattern_position.store(0, Ordering::Relaxed);
         self.error_codes_len.store(0, Ordering::Relaxed);
@@ -207,8 +214,8 @@ impl SharedFaultState {
     pub fn set_error_codes(&self, codes: &[i32]) {
         let count = std::cmp::min(codes.len(), self.error_codes.len());
 
-        for i in 0..count {
-            self.error_codes[i].store(codes[i], Ordering::Relaxed);
+        for (i, &code) in codes.iter().enumerate().take(count) {
+            self.error_codes[i].store(code, Ordering::Relaxed);
         }
 
         // Clear remaining slots
@@ -368,12 +375,14 @@ impl Drop for SharedStateManager {
         }
 
         // Unmap the memory from this process (always safe)
-        if let Err(_) = unsafe {
+        if unsafe {
             munmap(
                 std::ptr::NonNull::new_unchecked(self.ptr as *mut c_void),
                 self.size,
             )
-        } {
+        }
+        .is_err()
+        {
             // Silent failure during cleanup to avoid logging issues during destruction
         }
 
@@ -396,7 +405,7 @@ pub fn get_shared_state() -> Option<&'static SharedFaultState> {
 }
 
 pub fn init_shared_state() -> Result<(), Box<dyn std::error::Error>> {
-    SHARED_STATE_MANAGER.get_or_try_init(|| SharedStateManager::new())?;
+    SHARED_STATE_MANAGER.get_or_try_init(SharedStateManager::new)?;
     info!("shared state initialized successfully");
     Ok(())
 }

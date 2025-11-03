@@ -2,6 +2,16 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // generate git metadata for version tagging (similar to setuptools_scm)
+    let mut builder = vergen_git2::Git2Builder::default();
+    builder.sha(true).describe(true, true, None).dirty(true);
+    let git = builder.build().unwrap();
+    vergen_git2::Emitter::default()
+        .add_instructions(&git)
+        .unwrap()
+        .emit()
+        .unwrap();
+
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     // Check if UCX is available

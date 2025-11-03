@@ -2,19 +2,19 @@
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
-use crate::commands::Command;
+use crate::fault::FaultStrategy;
+#[cfg(test)]
+use crate::ipc::Command;
+#[cfg(test)]
+use crate::ipc::{get_current_state, handle_command};
 #[cfg(test)]
 use crate::state::LOCAL_STATE;
-#[cfg(test)]
-use crate::strategy::FaultStrategy;
-#[cfg(test)]
-use crate::subscriber::{get_current_state, handle_command};
 #[cfg(test)]
 use crate::ucx::*;
 
 #[test]
 fn test_fault_strategy_random() {
-    let mut strategy = FaultStrategy::new_random(100); // 100% probability
+    let mut strategy = FaultStrategy::new_random(10000); // 100% probability (scaled)
     assert!(strategy.should_inject().is_some());
 
     let mut strategy = FaultStrategy::new_random(0); // 0% probability
@@ -58,7 +58,7 @@ fn test_ucp_get_nbx_mock() {
     // to avoid expensive library search during testing
 
     // Test with fault injection disabled
-    assert!(crate::intercept::should_inject_fault().is_none());
+    assert!(crate::interception::should_inject_fault().is_none());
 
     // Enable fault injection
     LOCAL_STATE.enabled.store(true, Ordering::Relaxed);
@@ -66,12 +66,24 @@ fn test_ucp_get_nbx_mock() {
     // Force fault injection with 100% probability and specific error code
     {
         let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-        *strategy = FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_UNREACHABLE]);
+        *strategy = FaultStrategy::new_random_with_codes(10000, vec![UCS_ERR_UNREACHABLE]);
+        // 100% (scaled)
+
+        // Sync the lockfree state
+        crate::ipc::subscriber::sync_lockfree_strategy(&strategy);
+
+        // Also sync error codes
+        crate::state::sync_lockfree_error_codes(
+            &[UCS_ERR_UNREACHABLE],
+            &LOCAL_STATE.lockfree_random.enabled,
+            &LOCAL_STATE.lockfree_random.error_codes,
+            &LOCAL_STATE.lockfree_random.error_code_count,
+        );
     }
 
     // Test fault injection logic
     assert_eq!(
-        crate::intercept::should_inject_fault_for_function("ucp_get_nbx"),
+        crate::interception::should_inject_fault_for_function("ucp_get_nbx"),
         Some(UCS_ERR_UNREACHABLE)
     );
 }
@@ -95,12 +107,12 @@ fn test_get_current_state() {
 
     {
         let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
-        *strategy = FaultStrategy::new_random(75);
+        *strategy = FaultStrategy::new_random(7500); // 75% (scaled)
     }
 
     let state = get_current_state();
     assert!(state.enabled);
-    assert_eq!(state.probability, 75);
+    assert_eq!(state.probability, 75.0); // displayed as unscaled
     assert_eq!(state.strategy, "random");
     assert!(!state.error_codes.is_empty());
 }
@@ -109,7 +121,7 @@ fn test_get_current_state() {
 fn test_error_code_pools() {
     // Test random strategy with custom error codes
     let mut strategy =
-        FaultStrategy::new_random_with_codes(100, vec![UCS_ERR_NO_MEMORY, UCS_ERR_BUSY]);
+        FaultStrategy::new_random_with_codes(10000, vec![UCS_ERR_NO_MEMORY, UCS_ERR_BUSY]); // 100% (scaled)
     for _ in 0..10 {
         if let Some(error_code) = strategy.should_inject() {
             assert!(error_code == UCS_ERR_NO_MEMORY || error_code == UCS_ERR_BUSY);
@@ -189,7 +201,7 @@ fn test_socket_protocol_serialization() {
 
 #[test]
 fn test_socket_protocol_response() {
-    use crate::commands::Response;
+    use crate::ipc::Response;
     use std::io::{BufRead, BufReader, Write};
 
     // create a test response
@@ -235,7 +247,7 @@ fn test_command_roundtrip() {
 
 #[test]
 fn test_set_probability_with_float() {
-    // test that float probabilities are properly converted to u32
+    // test that float probabilities are properly handled with full precision
     let cmd = Command {
         command: "set_probability".to_string(),
         value: Some(75.5),
@@ -249,9 +261,9 @@ fn test_set_probability_with_float() {
     let response = handle_command(cmd);
     assert_eq!(response.status, "ok");
 
-    // verify internal state was set correctly (truncated to 75)
+    // verify internal state was set correctly (with full precision)
     let state = get_current_state();
-    assert_eq!(state.probability, 75);
+    assert_eq!(state.probability, 75.5);
 }
 
 #[test]
