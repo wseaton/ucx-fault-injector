@@ -68,6 +68,17 @@ fn test_ucp_get_nbx_mock() {
         let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
         *strategy = FaultStrategy::new_random_with_codes(10000, vec![UCS_ERR_UNREACHABLE]);
         // 100% (scaled)
+
+        // Sync the lockfree state
+        crate::ipc::subscriber::sync_lockfree_strategy(&strategy);
+
+        // Also sync error codes
+        crate::state::sync_lockfree_error_codes(
+            &[UCS_ERR_UNREACHABLE],
+            &LOCAL_STATE.lockfree_random.enabled,
+            &LOCAL_STATE.lockfree_random.error_codes,
+            &LOCAL_STATE.lockfree_random.error_code_count,
+        );
     }
 
     // Test fault injection logic

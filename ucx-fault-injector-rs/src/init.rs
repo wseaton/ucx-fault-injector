@@ -370,7 +370,10 @@ pub fn init_fault_injector() {
     }
 
     // Always initialize local state for each process
-    let _ = &*LOCAL_STATE; // Force initialization
+    #[cfg(not(test))]
+    let _ = &*LOCAL_STATE; // Force Lazy initialization
+    #[cfg(test)]
+    let _ = &LOCAL_STATE; // Already initialized as static
 
     // Apply environment variable configuration
     env_config.apply();

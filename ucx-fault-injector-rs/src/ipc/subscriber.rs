@@ -11,7 +11,7 @@ use crate::state::LOCAL_STATE;
 use crate::types::{ExportFormat, FaultPattern, HookName, Probability};
 
 // sync lock-free atomics with strategy state for hot path optimization
-fn sync_lockfree_strategy(strategy: &FaultStrategy) {
+pub(crate) fn sync_lockfree_strategy(strategy: &FaultStrategy) {
     match &strategy.selection_method {
         SelectionMethod::Random { probability } => {
             LOCAL_STATE
@@ -94,6 +94,7 @@ pub fn handle_command(cmd: Command) -> Response {
             let current = LOCAL_STATE.enabled.load(Ordering::Relaxed);
             let new_state = !current;
             LOCAL_STATE.enabled.store(new_state, Ordering::Relaxed);
+            #[cfg(not(test))]
             info!(enabled = new_state, "fault injection toggled");
             Response {
                 status: "ok".to_string(),
@@ -113,6 +114,7 @@ pub fn handle_command(cmd: Command) -> Response {
                         strategy.set_probability(prob.scaled());
                         sync_lockfree_strategy(&strategy);
                         drop(strategy);
+                        #[cfg(not(test))]
                         info!(probability = %prob, "probability set");
                         Response {
                             status: "ok".to_string(),

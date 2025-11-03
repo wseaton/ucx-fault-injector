@@ -1,7 +1,7 @@
+#[cfg(not(test))]
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use tracing::info;
 
 use crate::fault::FaultStrategy;
 use crate::recorder::CallRecordBuffer;
@@ -21,6 +21,15 @@ impl HookConfiguration {
             ucp_get_nbx_enabled: AtomicBool::new(true), // reads enabled by default
             ucp_put_nbx_enabled: AtomicBool::new(true), // writes enabled by default
             ucp_ep_flush_nbx_enabled: AtomicBool::new(true), // flush enabled by default
+        }
+    }
+
+    #[cfg(test)]
+    pub const fn new_const() -> Self {
+        Self {
+            ucp_get_nbx_enabled: AtomicBool::new(true),
+            ucp_put_nbx_enabled: AtomicBool::new(true),
+            ucp_ep_flush_nbx_enabled: AtomicBool::new(true),
         }
     }
 
@@ -107,6 +116,25 @@ impl LockFreeRandomState {
             error_code_count: AtomicUsize::new(3), // default 3 codes
         }
     }
+
+    #[cfg(test)]
+    pub const fn new_const() -> Self {
+        Self {
+            probability: AtomicU32::new(2500),
+            enabled: AtomicBool::new(true),
+            error_codes: [
+                AtomicI32::new(crate::ucx::UCS_ERR_IO_ERROR),
+                AtomicI32::new(crate::ucx::UCS_ERR_UNREACHABLE),
+                AtomicI32::new(crate::ucx::UCS_ERR_TIMED_OUT),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+                AtomicI32::new(0),
+            ],
+            error_code_count: AtomicUsize::new(3),
+        }
+    }
 }
 
 impl Default for LockFreeRandomState {
@@ -132,6 +160,21 @@ pub struct FaultStatistics {
 
 impl FaultStatistics {
     fn new() -> Self {
+        Self {
+            total_calls: AtomicU64::new(0),
+            faults_injected: AtomicU64::new(0),
+            calls_since_fault: AtomicU64::new(0),
+            ucp_get_nbx_calls: AtomicU64::new(0),
+            ucp_get_nbx_faults: AtomicU64::new(0),
+            ucp_put_nbx_calls: AtomicU64::new(0),
+            ucp_put_nbx_faults: AtomicU64::new(0),
+            ucp_ep_flush_nbx_calls: AtomicU64::new(0),
+            ucp_ep_flush_nbx_faults: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub const fn new_const() -> Self {
         Self {
             total_calls: AtomicU64::new(0),
             faults_injected: AtomicU64::new(0),
@@ -170,6 +213,19 @@ impl LocalFaultState {
             hook_config: HookConfiguration::default(),
             lockfree_random: LockFreeRandomState::new(),
             stats: FaultStatistics::new(),
+            call_recorder: CallRecordBuffer::new(),
+        }
+    }
+
+    // const version for test static initialization
+    #[cfg(test)]
+    pub const fn new_const() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            strategy: Mutex::new(crate::fault::FaultStrategy::new_const()),
+            hook_config: HookConfiguration::new_const(),
+            lockfree_random: LockFreeRandomState::new_const(),
+            stats: FaultStatistics::new_const(),
             call_recorder: CallRecordBuffer::new(),
         }
     }
@@ -242,10 +298,12 @@ impl LocalFaultState {
 }
 
 // Local process state (much safer than shared memory)
-pub static LOCAL_STATE: Lazy<LocalFaultState> = Lazy::new(|| {
-    info!("initializing local fault injection state");
-    LocalFaultState::new()
-});
+#[cfg(not(test))]
+pub static LOCAL_STATE: Lazy<LocalFaultState> = Lazy::new(LocalFaultState::new);
+
+// Test-specific version without Lazy to avoid initialization issues
+#[cfg(test)]
+pub static LOCAL_STATE: LocalFaultState = LocalFaultState::new_const();
 
 // local debug state (not shared)
 pub static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
