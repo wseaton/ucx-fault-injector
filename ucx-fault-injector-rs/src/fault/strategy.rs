@@ -1,4 +1,22 @@
 use crate::ucx::UcsStatus;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// per-call counter to ensure unique randomness for each call
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// debug info for fault injection decisions
+#[derive(Debug, Clone)]
+pub struct InjectionDecision {
+    pub error_code: Option<UcsStatus>,
+    pub random_value: u32,
+    pub probability: u32,
+}
+
+impl InjectionDecision {
+    pub fn should_inject(&self) -> Option<UcsStatus> {
+        self.error_code
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectionMethod {
@@ -111,6 +129,68 @@ impl FaultStrategy {
         }
     }
 
+    pub fn should_inject_with_debug(&mut self) -> InjectionDecision {
+        match &mut self.selection_method {
+            SelectionMethod::Random { probability } => {
+                if *probability == 0 || self.error_codes.is_empty() {
+                    return InjectionDecision {
+                        error_code: None,
+                        random_value: 0,
+                        probability: *probability,
+                    };
+                }
+
+                // simple random check
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                use std::time::{SystemTime, UNIX_EPOCH};
+
+                let mut hasher = DefaultHasher::new();
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+                    .hash(&mut hasher);
+
+                // add per-call entropy to avoid hash collisions on high-frequency calls
+                let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+                call_id.hash(&mut hasher);
+                let tid = unsafe { libc::pthread_self() as u64 };
+                tid.hash(&mut hasher);
+
+                // use 0-9999 range for 0.01% precision
+                let random = (hasher.finish() % 10000) as u32;
+
+                if random < *probability {
+                    // randomly select an error code from the pool (use different hash component)
+                    let code_index = ((hasher.finish().wrapping_mul(0x9e3779b97f4a7c15))
+                        % self.error_codes.len() as u64)
+                        as usize;
+                    InjectionDecision {
+                        error_code: Some(self.error_codes[code_index]),
+                        random_value: random,
+                        probability: *probability,
+                    }
+                } else {
+                    InjectionDecision {
+                        error_code: None,
+                        random_value: random,
+                        probability: *probability,
+                    }
+                }
+            }
+            SelectionMethod::Pattern { .. } | SelectionMethod::Replay { .. } => {
+                // for pattern/replay, use the existing logic and wrap in decision
+                let error_code = self.should_inject();
+                InjectionDecision {
+                    error_code,
+                    random_value: 0,
+                    probability: 0,
+                }
+            }
+        }
+    }
+
     pub fn should_inject(&mut self) -> Option<UcsStatus> {
         match &mut self.selection_method {
             SelectionMethod::Random { probability } => {
@@ -129,12 +209,21 @@ impl FaultStrategy {
                     .unwrap()
                     .as_nanos()
                     .hash(&mut hasher);
+
+                // add per-call entropy to avoid hash collisions on high-frequency calls
+                let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+                call_id.hash(&mut hasher);
+                let tid = unsafe { libc::pthread_self() as u64 };
+                tid.hash(&mut hasher);
+
                 // use 0-9999 range for 0.01% precision
                 let random = (hasher.finish() % 10000) as u32;
 
                 if random < *probability {
-                    // randomly select an error code from the pool
-                    let code_index = (hasher.finish() % self.error_codes.len() as u64) as usize;
+                    // randomly select an error code from the pool (use different hash component)
+                    let code_index = ((hasher.finish().wrapping_mul(0x9e3779b97f4a7c15))
+                        % self.error_codes.len() as u64)
+                        as usize;
                     Some(self.error_codes[code_index])
                 } else {
                     None

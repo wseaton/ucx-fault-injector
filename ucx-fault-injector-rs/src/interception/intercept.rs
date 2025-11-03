@@ -287,6 +287,64 @@ pub fn should_inject_fault_for_hook(hook_enabled: &AtomicBool) -> Option<UcsStat
     strategy.should_inject()
 }
 
+// version with debug info for logging PRNG details
+#[inline(always)]
+pub fn should_inject_fault_for_hook_with_debug(
+    hook_enabled: &AtomicBool,
+) -> crate::fault::strategy::InjectionDecision {
+    use crate::fault::strategy::InjectionDecision;
+
+    // fast path: check if fault injection is globally enabled
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
+        return InjectionDecision {
+            error_code: None,
+            random_value: 0,
+            probability: 0,
+        };
+    }
+
+    // fast path: check if this specific hook is enabled
+    if !hook_enabled.load(Ordering::Relaxed) {
+        return InjectionDecision {
+            error_code: None,
+            random_value: 0,
+            probability: 0,
+        };
+    }
+
+    // ultra-fast path: lock-free random strategy (most common case)
+    if LOCAL_STATE.lockfree_random.enabled.load(Ordering::Relaxed) {
+        let probability = LOCAL_STATE
+            .lockfree_random
+            .probability
+            .load(Ordering::Relaxed);
+        let random = fast_random();
+        let error_code = if random < probability {
+            let count = LOCAL_STATE
+                .lockfree_random
+                .error_code_count
+                .load(Ordering::Relaxed);
+            if count == 0 {
+                Some(crate::ucx::UCS_ERR_IO_ERROR)
+            } else {
+                let index = (fast_random() as usize) % count;
+                Some(LOCAL_STATE.lockfree_random.error_codes[index].load(Ordering::Relaxed))
+            }
+        } else {
+            None
+        };
+        return InjectionDecision {
+            error_code,
+            random_value: random,
+            probability,
+        };
+    }
+
+    // slow path: pattern/replay strategies require mutex lock
+    let mut strategy = LOCAL_STATE.strategy.lock().unwrap();
+    strategy.should_inject_with_debug()
+}
+
 // legacy function for backward compatibility (not used in hot path)
 pub fn should_inject_fault_for_function(function_name: &str) -> Option<UcsStatus> {
     let hook_enabled = match function_name {

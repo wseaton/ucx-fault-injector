@@ -10,6 +10,7 @@ use crate::interception::{
 };
 use crate::ipc::{get_current_state, start_file_watcher, start_socket_server};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
+use crate::types::Probability;
 use crate::version_info;
 
 // environment variable configuration
@@ -33,12 +34,11 @@ impl EnvConfig {
 
         let strategy = std::env::var("UCX_FAULT_STRATEGY").ok();
 
-        let probability = std::env::var("UCX_FAULT_PROBABILITY").ok().and_then(|v| {
-            v.parse::<f64>()
-                .ok()
-                .filter(|&p| (0.0..=100.0).contains(&p))
-                .map(|p| (p * 100.0) as u32) // scale to 0-10000 range
-        });
+        let probability = std::env::var("UCX_FAULT_PROBABILITY")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .and_then(|p| Probability::from_percentage(p).ok())
+            .map(|p| p.scaled());
 
         let pattern = std::env::var("UCX_FAULT_PATTERN").ok();
 
@@ -235,16 +235,22 @@ impl IpcBackend {
     }
 }
 
-// initialize tracing subscriber
+// initialize tracing subscriber with process context
 pub fn init_tracing() {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "ucx_fault_injector=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_thread_ids(true)
+                .with_target(false)
+                .with_span_events(FmtSpan::ACTIVE),
+        )
         .init();
 }
 
@@ -333,6 +339,8 @@ pub fn init_fault_injector() {
     init_tracing();
 
     let current_pid = std::process::id();
+    let span = tracing::info_span!("init", pid = current_pid);
+    let _enter = span.enter();
 
     // parse environment variable configuration FIRST
     let env_config = EnvConfig::from_env();
@@ -343,7 +351,7 @@ pub fn init_fault_injector() {
 
     if !function_intercept_already_initialized {
         info!(version = %version_info(), "UCX fault injector loaded");
-        info!(pid = current_pid, "initialization starting");
+        info!("initialization starting");
 
         // Force initialization of real functions to check symbol loading
         debug!("initializing real UCX function pointers");
@@ -364,7 +372,6 @@ pub fn init_fault_injector() {
         info!("UCX fault injector function interception initialization complete");
     } else {
         info!(
-            pid = current_pid,
             "UCX fault injector function interception already initialized, skipping function setup"
         );
     }
@@ -475,7 +482,6 @@ pub fn init_fault_injector() {
     }
 
     info!(
-        pid = current_pid,
         ipc_enabled = env_config.ipc_enable,
         "UCX fault injector initialization complete"
     );
