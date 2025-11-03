@@ -1,8 +1,4 @@
 use crate::ucx::UcsStatus;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-// per-call counter to ensure unique randomness for each call
-static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // debug info for fault injection decisions
 #[derive(Debug, Clone)]
@@ -140,32 +136,10 @@ impl FaultStrategy {
                     };
                 }
 
-                // simple random check
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                use std::time::{SystemTime, UNIX_EPOCH};
-
-                let mut hasher = DefaultHasher::new();
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-                    .hash(&mut hasher);
-
-                // add per-call entropy to avoid hash collisions on high-frequency calls
-                let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-                call_id.hash(&mut hasher);
-                let tid = unsafe { libc::pthread_self() as u64 };
-                tid.hash(&mut hasher);
-
-                // use 0-9999 range for 0.01% precision
-                let random = (hasher.finish() % 10000) as u32;
+                let random = fastrand::u32(0..10000);
 
                 if random < *probability {
-                    // randomly select an error code from the pool (use different hash component)
-                    let code_index = ((hasher.finish().wrapping_mul(0x9e3779b97f4a7c15))
-                        % self.error_codes.len() as u64)
-                        as usize;
+                    let code_index = fastrand::usize(0..self.error_codes.len());
                     InjectionDecision {
                         error_code: Some(self.error_codes[code_index]),
                         random_value: random,
@@ -198,32 +172,10 @@ impl FaultStrategy {
                     return None;
                 }
 
-                // simple random check
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                use std::time::{SystemTime, UNIX_EPOCH};
-
-                let mut hasher = DefaultHasher::new();
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-                    .hash(&mut hasher);
-
-                // add per-call entropy to avoid hash collisions on high-frequency calls
-                let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-                call_id.hash(&mut hasher);
-                let tid = unsafe { libc::pthread_self() as u64 };
-                tid.hash(&mut hasher);
-
-                // use 0-9999 range for 0.01% precision
-                let random = (hasher.finish() % 10000) as u32;
+                let random = fastrand::u32(0..10000);
 
                 if random < *probability {
-                    // randomly select an error code from the pool (use different hash component)
-                    let code_index = ((hasher.finish().wrapping_mul(0x9e3779b97f4a7c15))
-                        % self.error_codes.len() as u64)
-                        as usize;
+                    let code_index = fastrand::usize(0..self.error_codes.len());
                     Some(self.error_codes[code_index])
                 } else {
                     None

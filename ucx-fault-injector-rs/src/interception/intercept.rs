@@ -210,28 +210,10 @@ pub fn should_inject_fault() -> Option<UcsStatus> {
     strategy.should_inject()
 }
 
-// thread-local RNG for lock-free random decisions
-thread_local! {
-    static THREAD_RNG: std::cell::Cell<u64> = std::cell::Cell::new({
-        use std::time::SystemTime;
-        let tid = unsafe { libc::pthread_self() as u64 };
-        let time = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-        tid.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(time)
-    });
-}
-
-// fast, lock-free random number generator (xorshift)
-#[inline(always)]
 // returns 0-9999 for 0.01% precision (scale factor of 100)
+#[inline(always)]
 fn fast_random() -> u32 {
-    THREAD_RNG.with(|rng| {
-        let mut x = rng.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        rng.set(x);
-        (x % 10000) as u32
-    })
+    fastrand::u32(0..10000)
 }
 
 // lock-free random fault injection (hot path - no mutex!)

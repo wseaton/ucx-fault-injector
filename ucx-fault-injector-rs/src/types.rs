@@ -15,7 +15,7 @@ impl Probability {
     pub const DEFAULT: Self = Self(2500); // 25%
 
     pub fn from_percentage(pct: f64) -> Result<Self, &'static str> {
-        if !(0.0..=100.0).contains(&pct) {
+        if !pct.is_finite() || !(0.0..=100.0).contains(&pct) {
             return Err("probability must be 0.0-100.0");
         }
         Ok(Self((pct * PROBABILITY_SCALE_FACTOR as f64) as u32))
@@ -44,6 +44,15 @@ impl Probability {
 impl Default for Probability {
     fn default() -> Self {
         Self::DEFAULT
+    }
+}
+
+impl FromStr for Probability {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let pct = s.parse::<f64>().map_err(|_| "invalid number")?;
+        Self::from_percentage(pct)
     }
 }
 
@@ -224,6 +233,17 @@ mod tests {
         assert!(Probability::from_percentage(-1.0).is_err());
         assert!(Probability::from_percentage(0.0).is_ok());
         assert!(Probability::from_percentage(100.0).is_ok());
+        assert!(Probability::from_percentage(f64::NAN).is_err());
+        assert!(Probability::from_percentage(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn probability_from_str() {
+        assert_eq!("25.0".parse::<Probability>().unwrap().scaled(), 2500);
+        assert_eq!("0.5".parse::<Probability>().unwrap().scaled(), 50);
+        assert_eq!("100".parse::<Probability>().unwrap().scaled(), 10000);
+        assert!("invalid".parse::<Probability>().is_err());
+        assert!("150".parse::<Probability>().is_err());
     }
 
     #[test]

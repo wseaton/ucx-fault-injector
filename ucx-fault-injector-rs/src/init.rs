@@ -36,15 +36,16 @@ impl EnvConfig {
 
         let probability = std::env::var("UCX_FAULT_PROBABILITY")
             .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .and_then(|p| Probability::from_percentage(p).ok())
+            .and_then(|v| v.parse::<Probability>().ok())
             .map(|p| p.scaled());
 
         let pattern = std::env::var("UCX_FAULT_PATTERN").ok();
 
         let error_codes = std::env::var("UCX_FAULT_ERROR_CODES").ok().and_then(|v| {
-            let codes: Result<Vec<i32>, _> = v.split(',').map(|s| s.trim().parse()).collect();
-            codes.ok()
+            v.split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
         });
 
         let hooks = std::env::var("UCX_FAULT_HOOKS")
