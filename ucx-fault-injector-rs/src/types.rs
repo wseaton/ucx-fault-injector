@@ -169,11 +169,12 @@ impl fmt::Display for HookName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportFormat {
     Pattern,
     Records,
+    #[default]
     Summary,
 }
 
@@ -197,12 +198,6 @@ impl FromStr for ExportFormat {
             "summary" => Ok(Self::Summary),
             _ => Err(format!("unknown export format: {}", s)),
         }
-    }
-}
-
-impl Default for ExportFormat {
-    fn default() -> Self {
-        Self::Summary
     }
 }
 

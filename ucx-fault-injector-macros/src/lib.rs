@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Token, parse::Parse, parse::ParseStream, Result};
+use syn::{parse::Parse, parse::ParseStream, parse_macro_input, FnArg, ItemFn, Result, Token};
 
 struct InterceptorArgs {
     real_fn_static: syn::Expr,
@@ -28,7 +28,12 @@ impl Parse for InterceptorArgs {
                 "hook_enabled" => hook_enabled = Some(input.parse()?),
                 "calls_counter" => calls_counter = Some(input.parse()?),
                 "faults_counter" => faults_counter = Some(input.parse()?),
-                _ => return Err(syn::Error::new(ident.span(), format!("unknown parameter: {}", ident))),
+                _ => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("unknown parameter: {}", ident),
+                    ))
+                }
             }
 
             if !input.is_empty() {
