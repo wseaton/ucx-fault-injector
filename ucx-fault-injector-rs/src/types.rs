@@ -136,6 +136,7 @@ pub enum HookName {
     UcpGetNbx,
     UcpPutNbx,
     UcpEpFlushNbx,
+    UcpRequestCheckStatus,
     All,
 }
 
@@ -145,12 +146,19 @@ impl HookName {
             Self::UcpGetNbx => "ucp_get_nbx",
             Self::UcpPutNbx => "ucp_put_nbx",
             Self::UcpEpFlushNbx => "ucp_ep_flush_nbx",
+            Self::UcpRequestCheckStatus => "ucp_request_check_status",
             Self::All => "all",
         }
     }
 
     pub fn variants() -> &'static [&'static str] {
-        &["ucp_get_nbx", "ucp_put_nbx", "ucp_ep_flush_nbx", "all"]
+        &[
+            "ucp_get_nbx",
+            "ucp_put_nbx",
+            "ucp_ep_flush_nbx",
+            "ucp_request_check_status",
+            "all",
+        ]
     }
 }
 
@@ -162,6 +170,7 @@ impl FromStr for HookName {
             "ucp_get_nbx" => Ok(Self::UcpGetNbx),
             "ucp_put_nbx" => Ok(Self::UcpPutNbx),
             "ucp_ep_flush_nbx" => Ok(Self::UcpEpFlushNbx),
+            "ucp_request_check_status" => Ok(Self::UcpRequestCheckStatus),
             "all" => Ok(Self::All),
             _ => Err(format!(
                 "unknown hook name: {}. valid options: {}",

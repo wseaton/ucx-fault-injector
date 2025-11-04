@@ -13,6 +13,7 @@ pub struct HookConfiguration {
     pub ucp_get_nbx_enabled: AtomicBool,
     pub ucp_put_nbx_enabled: AtomicBool,
     pub ucp_ep_flush_nbx_enabled: AtomicBool,
+    pub ucp_request_check_status_enabled: AtomicBool,
 }
 
 impl HookConfiguration {
@@ -21,6 +22,7 @@ impl HookConfiguration {
             ucp_get_nbx_enabled: AtomicBool::new(true), // reads enabled by default
             ucp_put_nbx_enabled: AtomicBool::new(true), // writes enabled by default
             ucp_ep_flush_nbx_enabled: AtomicBool::new(true), // flush enabled by default
+            ucp_request_check_status_enabled: AtomicBool::new(true), // check status enabled by default
         }
     }
 
@@ -30,6 +32,7 @@ impl HookConfiguration {
             ucp_get_nbx_enabled: AtomicBool::new(true),
             ucp_put_nbx_enabled: AtomicBool::new(true),
             ucp_ep_flush_nbx_enabled: AtomicBool::new(true),
+            ucp_request_check_status_enabled: AtomicBool::new(true),
         }
     }
 
@@ -38,6 +41,9 @@ impl HookConfiguration {
             HookName::UcpGetNbx => self.ucp_get_nbx_enabled.store(true, Ordering::Relaxed),
             HookName::UcpPutNbx => self.ucp_put_nbx_enabled.store(true, Ordering::Relaxed),
             HookName::UcpEpFlushNbx => self.ucp_ep_flush_nbx_enabled.store(true, Ordering::Relaxed),
+            HookName::UcpRequestCheckStatus => self
+                .ucp_request_check_status_enabled
+                .store(true, Ordering::Relaxed),
             HookName::All => self.enable_all(),
         }
     }
@@ -49,6 +55,9 @@ impl HookConfiguration {
             HookName::UcpEpFlushNbx => self
                 .ucp_ep_flush_nbx_enabled
                 .store(false, Ordering::Relaxed),
+            HookName::UcpRequestCheckStatus => self
+                .ucp_request_check_status_enabled
+                .store(false, Ordering::Relaxed),
             HookName::All => self.disable_all(),
         }
     }
@@ -58,10 +67,16 @@ impl HookConfiguration {
             HookName::UcpGetNbx => self.ucp_get_nbx_enabled.load(Ordering::Relaxed),
             HookName::UcpPutNbx => self.ucp_put_nbx_enabled.load(Ordering::Relaxed),
             HookName::UcpEpFlushNbx => self.ucp_ep_flush_nbx_enabled.load(Ordering::Relaxed),
+            HookName::UcpRequestCheckStatus => self
+                .ucp_request_check_status_enabled
+                .load(Ordering::Relaxed),
             HookName::All => {
                 self.ucp_get_nbx_enabled.load(Ordering::Relaxed)
                     && self.ucp_put_nbx_enabled.load(Ordering::Relaxed)
                     && self.ucp_ep_flush_nbx_enabled.load(Ordering::Relaxed)
+                    && self
+                        .ucp_request_check_status_enabled
+                        .load(Ordering::Relaxed)
             }
         }
     }
@@ -70,12 +85,16 @@ impl HookConfiguration {
         self.ucp_get_nbx_enabled.store(true, Ordering::Relaxed);
         self.ucp_put_nbx_enabled.store(true, Ordering::Relaxed);
         self.ucp_ep_flush_nbx_enabled.store(true, Ordering::Relaxed);
+        self.ucp_request_check_status_enabled
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn disable_all(&self) {
         self.ucp_get_nbx_enabled.store(false, Ordering::Relaxed);
         self.ucp_put_nbx_enabled.store(false, Ordering::Relaxed);
         self.ucp_ep_flush_nbx_enabled
+            .store(false, Ordering::Relaxed);
+        self.ucp_request_check_status_enabled
             .store(false, Ordering::Relaxed);
     }
 }
@@ -156,6 +175,8 @@ pub struct FaultStatistics {
     pub ucp_put_nbx_faults: AtomicU64,
     pub ucp_ep_flush_nbx_calls: AtomicU64,
     pub ucp_ep_flush_nbx_faults: AtomicU64,
+    pub ucp_request_check_status_calls: AtomicU64,
+    pub ucp_request_check_status_faults: AtomicU64,
 }
 
 impl FaultStatistics {
@@ -170,6 +191,8 @@ impl FaultStatistics {
             ucp_put_nbx_faults: AtomicU64::new(0),
             ucp_ep_flush_nbx_calls: AtomicU64::new(0),
             ucp_ep_flush_nbx_faults: AtomicU64::new(0),
+            ucp_request_check_status_calls: AtomicU64::new(0),
+            ucp_request_check_status_faults: AtomicU64::new(0),
         }
     }
 
@@ -185,6 +208,8 @@ impl FaultStatistics {
             ucp_put_nbx_faults: AtomicU64::new(0),
             ucp_ep_flush_nbx_calls: AtomicU64::new(0),
             ucp_ep_flush_nbx_faults: AtomicU64::new(0),
+            ucp_request_check_status_calls: AtomicU64::new(0),
+            ucp_request_check_status_faults: AtomicU64::new(0),
         }
     }
 }

@@ -1,18 +1,21 @@
 use libc::{c_void, size_t};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, warn};
 use ucx_fault_injector_macros::ucx_interceptor;
 
 use super::symbol_lookup::find_real_ucx_function;
 use crate::ipc::get_current_state;
 use crate::recorder::{CallParams, FunctionType};
-use crate::state::{is_in_intercept, DEBUG_ENABLED, LOCAL_STATE};
-use crate::ucx::{ucs_status_to_ptr, UcpEpH, UcpRequestParamT, UcpRkeyH, UcsStatus, UcsStatusPtr};
+use crate::state::{is_in_intercept, set_in_intercept, DEBUG_ENABLED, LOCAL_STATE};
+use crate::ucx::{
+    ucs_status_to_ptr, UcpEpH, UcpRequestParamT, UcpRkeyH, UcsStatus, UcsStatusPtr, UCS_OK,
+};
 
 // function pointers to real UCX functions - use atomic pointer to avoid deadlock
 static REAL_UCP_GET_NBX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_UCP_PUT_NBX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_UCP_EP_FLUSH_NBX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_UCP_REQUEST_CHECK_STATUS: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 // simplified finder functions using generic implementation
 pub fn try_find_real_ucp_get_nbx() -> *mut c_void {
@@ -28,6 +31,11 @@ pub fn try_find_real_ucp_put_nbx() -> *mut c_void {
 pub fn try_find_real_ucp_ep_flush_nbx() -> *mut c_void {
     let our_addr = ucp_ep_flush_nbx as *const () as *mut c_void;
     find_real_ucx_function("ucp_ep_flush_nbx", our_addr)
+}
+
+pub fn try_find_real_ucp_request_check_status() -> *mut c_void {
+    let our_addr = ucp_request_check_status as *const () as *mut c_void;
+    find_real_ucx_function("ucp_request_check_status", our_addr)
 }
 
 // macro to generate init functions for real UCX function pointers
@@ -197,6 +205,12 @@ generate_init_function!(
     REAL_UCP_EP_FLUSH_NBX,
     "ucp_ep_flush_nbx"
 );
+generate_init_function!(
+    init_real_ucp_request_check_status,
+    try_find_real_ucp_request_check_status,
+    REAL_UCP_REQUEST_CHECK_STATUS,
+    "ucp_request_check_status"
+);
 
 // helper function to decide fault injection using local state
 pub fn should_inject_fault() -> Option<UcsStatus> {
@@ -333,6 +347,7 @@ pub fn should_inject_fault_for_function(function_name: &str) -> Option<UcsStatus
         "ucp_get_nbx" => &LOCAL_STATE.hook_config.ucp_get_nbx_enabled,
         "ucp_put_nbx" => &LOCAL_STATE.hook_config.ucp_put_nbx_enabled,
         "ucp_ep_flush_nbx" => &LOCAL_STATE.hook_config.ucp_ep_flush_nbx_enabled,
+        "ucp_request_check_status" => &LOCAL_STATE.hook_config.ucp_request_check_status_enabled,
         _ => return None,
     };
     should_inject_fault_for_hook(hook_enabled)
@@ -403,4 +418,134 @@ pub extern "C" fn ucp_ep_flush_nbx(ep: UcpEpH, param: UcpRequestParamT) -> UcsSt
         endpoint: ep as u64,
         rkey: 0,
     }
+}
+
+// ucp_request_check_status returns UcsStatus (int) not UcsStatusPtr, so we need manual implementation
+#[no_mangle]
+pub extern "C" fn ucp_request_check_status(request: *mut c_void) -> UcsStatus {
+    const FN_NAME: &str = "ucp_request_check_status";
+
+    // ULTRA-FAST PATH: bypass when fault injection disabled
+    if !LOCAL_STATE.enabled.load(Ordering::Relaxed) {
+        let real_fn_ptr = REAL_UCP_REQUEST_CHECK_STATUS.load(Ordering::Relaxed);
+        if !real_fn_ptr.is_null() {
+            let real_fn: extern "C" fn(*mut c_void) -> UcsStatus =
+                unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(request);
+        }
+        // lazy init fallback
+        let real_fn_ptr = try_find_real_ucp_request_check_status();
+        if !real_fn_ptr.is_null() {
+            REAL_UCP_REQUEST_CHECK_STATUS.store(real_fn_ptr, Ordering::Relaxed);
+            let real_fn: extern "C" fn(*mut c_void) -> UcsStatus =
+                unsafe { std::mem::transmute(real_fn_ptr) };
+            return real_fn(request);
+        }
+    }
+
+    // reentrancy guard
+    if check_reentrancy_guard(FN_NAME) {
+        return UCS_OK; // safe default
+    }
+
+    set_in_intercept(true);
+
+    // update statistics
+    update_call_stats(&LOCAL_STATE.stats.ucp_request_check_status_calls);
+
+    static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+    let call_num = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // debug logging
+    log_debug_info_if_enabled(FN_NAME, call_num);
+
+    // log injection stats periodically
+    let log_interval = LOCAL_STATE.stats_log_interval.load(Ordering::Relaxed);
+    if log_interval > 0
+        && call_num > 0
+        && call_num.is_multiple_of(log_interval)
+        && LOCAL_STATE.lockfree_random.enabled.load(Ordering::Relaxed)
+    {
+        let total = LOCAL_STATE
+            .stats
+            .ucp_request_check_status_calls
+            .load(Ordering::Relaxed);
+        let faults = LOCAL_STATE
+            .stats
+            .ucp_request_check_status_faults
+            .load(Ordering::Relaxed);
+        let rate = if total > 0 {
+            (faults as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        tracing::info!(
+            pid = std::process::id(),
+            function = FN_NAME,
+            total_calls = total,
+            faults_injected = faults,
+            injection_rate = format!("{:.2}%", rate),
+            "[STATS] {} injection rate: {}/{} ({:.2}%)",
+            FN_NAME,
+            faults,
+            total,
+            rate
+        );
+    }
+
+    // build params
+    let params = CallParams {
+        function_type: FunctionType::UcpRequestCheckStatus,
+        transfer_size: 0,
+        remote_addr: 0,
+        endpoint: request as u64,
+        rkey: 0,
+    };
+
+    // check for fault injection
+    if let Some(error_code) = handle_fault_injection(
+        FN_NAME,
+        &LOCAL_STATE.hook_config.ucp_request_check_status_enabled,
+        call_num,
+        &LOCAL_STATE.stats.ucp_request_check_status_faults,
+        &params,
+    ) {
+        set_in_intercept(false);
+        // convert pointer back to status code for this function
+        return error_code as isize as UcsStatus;
+    }
+
+    // get real function pointer
+    let real_fn_ptr = get_real_function_ptr(
+        &REAL_UCP_REQUEST_CHECK_STATUS,
+        try_find_real_ucp_request_check_status,
+        FN_NAME,
+    );
+
+    let result = if !real_fn_ptr.is_null() {
+        let real_fn: extern "C" fn(*mut c_void) -> UcsStatus =
+            unsafe { std::mem::transmute(real_fn_ptr) };
+        debug!(
+            pid = std::process::id(),
+            call_num,
+            address = ?real_fn_ptr,
+            "calling real {}",
+            FN_NAME
+        );
+        let result = real_fn(request);
+        debug!(
+            pid = std::process::id(),
+            call_num, result, "real {} returned", FN_NAME
+        );
+        result
+    } else {
+        warn!(
+            pid = std::process::id(),
+            call_num, "real {} not found, returning IO_ERROR", FN_NAME
+        );
+        crate::ucx::UCS_ERR_IO_ERROR
+    };
+
+    set_in_intercept(false);
+    result
 }

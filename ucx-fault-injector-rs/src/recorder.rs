@@ -14,6 +14,7 @@ pub enum FunctionType {
     UcpGetNbx = 0,
     UcpPutNbx = 1,
     UcpEpFlushNbx = 2,
+    UcpRequestCheckStatus = 3,
 }
 
 impl FunctionType {
@@ -22,6 +23,7 @@ impl FunctionType {
             0 => Some(Self::UcpGetNbx),
             1 => Some(Self::UcpPutNbx),
             2 => Some(Self::UcpEpFlushNbx),
+            3 => Some(Self::UcpRequestCheckStatus),
             _ => None,
         }
     }
@@ -31,6 +33,7 @@ impl FunctionType {
             Self::UcpGetNbx => "ucp_get_nbx",
             Self::UcpPutNbx => "ucp_put_nbx",
             Self::UcpEpFlushNbx => "ucp_ep_flush_nbx",
+            Self::UcpRequestCheckStatus => "ucp_request_check_status",
         }
     }
 }

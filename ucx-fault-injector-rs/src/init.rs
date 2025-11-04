@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 use crate::fault::FaultStrategy;
 use crate::interception::{
     init_real_ucp_ep_flush_nbx, init_real_ucp_get_nbx, init_real_ucp_put_nbx,
+    init_real_ucp_request_check_status,
 };
 use crate::ipc::{get_current_state, start_file_watcher, start_socket_server};
 use crate::state::{DEBUG_ENABLED, LOCAL_STATE};
@@ -98,6 +99,10 @@ impl EnvConfig {
                 .hook_config
                 .ucp_ep_flush_nbx_enabled
                 .store(false, Ordering::Relaxed);
+            LOCAL_STATE
+                .hook_config
+                .ucp_request_check_status_enabled
+                .store(false, Ordering::Relaxed);
 
             for hook in hooks {
                 match hook.as_str() {
@@ -122,6 +127,13 @@ impl EnvConfig {
                             .store(true, Ordering::Relaxed);
                         info!("enabled hook: ucp_ep_flush_nbx");
                     }
+                    "ucp_request_check_status" | "check_status" => {
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_request_check_status_enabled
+                            .store(true, Ordering::Relaxed);
+                        info!("enabled hook: ucp_request_check_status");
+                    }
                     "all" => {
                         LOCAL_STATE
                             .hook_config
@@ -134,6 +146,10 @@ impl EnvConfig {
                         LOCAL_STATE
                             .hook_config
                             .ucp_ep_flush_nbx_enabled
+                            .store(true, Ordering::Relaxed);
+                        LOCAL_STATE
+                            .hook_config
+                            .ucp_request_check_status_enabled
                             .store(true, Ordering::Relaxed);
                         info!("enabled all hooks");
                     }
@@ -381,6 +397,7 @@ pub fn init_fault_injector() {
         init_real_ucp_get_nbx();
         init_real_ucp_put_nbx();
         init_real_ucp_ep_flush_nbx();
+        init_real_ucp_request_check_status();
 
         // Print detailed debug info if debug mode is enabled
         if env_config.debug {
