@@ -182,8 +182,13 @@ pub fn ucx_interceptor(args: TokenStream, input: TokenStream) -> TokenStream {
                 crate::interception::log_debug_info_if_enabled_internal(call_num);
             }
 
-            // log injection stats periodically (every 256 calls)
-            if call_num > 0 && call_num % 256 == 0 {
+            // log injection stats periodically (configurable interval, random strategy only)
+            let log_interval = crate::state::LOCAL_STATE.stats_log_interval.load(std::sync::atomic::Ordering::Relaxed);
+            if log_interval > 0
+                && call_num > 0
+                && call_num % log_interval == 0
+                && crate::state::LOCAL_STATE.lockfree_random.enabled.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 let total = #calls_counter.load(std::sync::atomic::Ordering::Relaxed);
                 let faults = #faults_counter.load(std::sync::atomic::Ordering::Relaxed);
                 let rate = if total > 0 {

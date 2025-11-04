@@ -24,6 +24,7 @@ struct EnvConfig {
     hooks: Option<Vec<String>>,
     ipc_enable: bool,
     debug: bool,
+    stats_log_interval: Option<u32>,
 }
 
 impl EnvConfig {
@@ -56,6 +57,10 @@ impl EnvConfig {
 
         let debug = std::env::var("UCX_FAULT_DEBUG").is_ok();
 
+        let stats_log_interval = std::env::var("UCX_FAULT_STATS_LOG_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+
         Self {
             enabled,
             strategy,
@@ -65,6 +70,7 @@ impl EnvConfig {
             hooks,
             ipc_enable,
             debug,
+            stats_log_interval,
         }
     }
 
@@ -215,6 +221,22 @@ impl EnvConfig {
             );
         } else {
             info!("fault injection DISABLED by default (set UCX_FAULT_ENABLED=1 to enable)");
+        }
+
+        // configure stats logging interval
+        if let Some(interval) = self.stats_log_interval {
+            LOCAL_STATE
+                .stats_log_interval
+                .store(interval, Ordering::Relaxed);
+            if interval == 0 {
+                info!("stats logging disabled via UCX_FAULT_STATS_LOG_INTERVAL=0");
+            } else {
+                info!(
+                    interval,
+                    "stats will be logged every {} calls via UCX_FAULT_STATS_LOG_INTERVAL",
+                    interval
+                );
+            }
         }
     }
 }
@@ -471,14 +493,15 @@ pub fn init_fault_injector() {
         info!("fault injector configured via environment variables only");
         if !function_intercept_already_initialized {
             info!("available environment variables:");
-            info!("  UCX_FAULT_ENABLED=1           - enable fault injection at startup");
-            info!("  UCX_FAULT_STRATEGY=random     - set strategy (random|pattern)");
-            info!("  UCX_FAULT_PROBABILITY=25      - set probability (0.0-100.0) for random");
-            info!("  UCX_FAULT_PATTERN=XOOOXOOO    - set pattern for pattern strategy");
-            info!("  UCX_FAULT_ERROR_CODES=-3,-6   - comma-separated error codes");
-            info!("  UCX_FAULT_HOOKS=ucp_get_nbx   - which hooks to enable (default: all)");
-            info!("  UCX_FAULT_IPC_ENABLE=1        - enable runtime control via IPC");
-            info!("  UCX_FAULT_DEBUG=1             - enable debug logging");
+            info!("  UCX_FAULT_ENABLED=1                - enable fault injection at startup");
+            info!("  UCX_FAULT_STRATEGY=random          - set strategy (random|pattern)");
+            info!("  UCX_FAULT_PROBABILITY=25           - set probability (0.0-100.0) for random");
+            info!("  UCX_FAULT_PATTERN=XOOOXOOO         - set pattern for pattern strategy");
+            info!("  UCX_FAULT_ERROR_CODES=-3,-6        - comma-separated error codes");
+            info!("  UCX_FAULT_HOOKS=ucp_get_nbx        - which hooks to enable (default: all)");
+            info!("  UCX_FAULT_STATS_LOG_INTERVAL=64    - log stats every N calls (0=disabled, default=64)");
+            info!("  UCX_FAULT_IPC_ENABLE=1             - enable runtime control via IPC");
+            info!("  UCX_FAULT_DEBUG=1                  - enable debug logging");
         }
     }
 

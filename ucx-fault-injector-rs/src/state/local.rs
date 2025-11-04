@@ -203,6 +203,7 @@ pub struct LocalFaultState {
     pub lockfree_random: LockFreeRandomState,
     pub stats: FaultStatistics,
     pub call_recorder: CallRecordBuffer,
+    pub stats_log_interval: AtomicU32, // log stats every N calls (0 = disabled)
 }
 
 impl LocalFaultState {
@@ -214,6 +215,7 @@ impl LocalFaultState {
             lockfree_random: LockFreeRandomState::new(),
             stats: FaultStatistics::new(),
             call_recorder: CallRecordBuffer::new(),
+            stats_log_interval: AtomicU32::new(64), // default: log every 64 calls
         }
     }
 
@@ -227,6 +229,7 @@ impl LocalFaultState {
             lockfree_random: LockFreeRandomState::new_const(),
             stats: FaultStatistics::new_const(),
             call_recorder: CallRecordBuffer::new(),
+            stats_log_interval: AtomicU32::new(64),
         }
     }
 

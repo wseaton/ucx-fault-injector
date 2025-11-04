@@ -42,6 +42,7 @@ fn test_command_handling() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);
@@ -160,6 +161,7 @@ fn test_set_error_codes_command() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);
@@ -182,6 +184,7 @@ fn test_socket_protocol_serialization() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     // serialize to buffer
@@ -238,6 +241,7 @@ fn test_command_roundtrip() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);
@@ -256,6 +260,7 @@ fn test_set_probability_with_float() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);
@@ -277,6 +282,7 @@ fn test_invalid_probability_range() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);
@@ -292,6 +298,7 @@ fn test_invalid_probability_range() {
         recording_enabled: None,
         export_format: None,
         hook_name: None,
+        stats_log_interval: None,
     };
 
     let response = handle_command(cmd);

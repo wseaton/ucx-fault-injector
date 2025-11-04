@@ -10,6 +10,7 @@ pub struct Command {
     pub recording_enabled: Option<bool>,
     pub export_format: Option<String>,
     pub hook_name: Option<String>, // for hook-specific enable/disable
+    pub stats_log_interval: Option<u32>, // for configuring stats logging interval
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,6 +45,9 @@ pub struct State {
     pub ucp_put_nbx_faults: u64,
     pub ucp_ep_flush_nbx_calls: u64,
     pub ucp_ep_flush_nbx_faults: u64,
+
+    // stats logging configuration
+    pub stats_log_interval: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

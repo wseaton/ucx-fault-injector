@@ -85,6 +85,8 @@ pub fn get_current_state() -> State {
             .stats
             .ucp_ep_flush_nbx_faults
             .load(Ordering::Relaxed),
+
+        stats_log_interval: LOCAL_STATE.stats_log_interval.load(Ordering::Relaxed),
     }
 }
 
@@ -340,6 +342,24 @@ pub fn handle_command(cmd: Command) -> Response {
             Response {
                 status: "ok".to_string(),
                 message: "Call recording buffer cleared".to_string(),
+                state: Some(get_current_state()),
+                recording_data: None,
+            }
+        }
+        "set_stats_log_interval" => {
+            let interval = cmd.stats_log_interval.unwrap_or(0);
+            LOCAL_STATE
+                .stats_log_interval
+                .store(interval, Ordering::Relaxed);
+            info!(interval = interval, "stats log interval updated");
+            let msg = if interval == 0 {
+                "Stats logging disabled".to_string()
+            } else {
+                format!("Stats will be logged every {} calls", interval)
+            };
+            Response {
+                status: "ok".to_string(),
+                message: msg,
                 state: Some(get_current_state()),
                 recording_data: None,
             }
