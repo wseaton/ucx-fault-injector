@@ -182,6 +182,29 @@ pub fn ucx_interceptor(args: TokenStream, input: TokenStream) -> TokenStream {
                 crate::interception::log_debug_info_if_enabled_internal(call_num);
             }
 
+            // log injection stats periodically (every 256 calls)
+            if call_num > 0 && call_num % 256 == 0 {
+                let total = #calls_counter.load(std::sync::atomic::Ordering::Relaxed);
+                let faults = #faults_counter.load(std::sync::atomic::Ordering::Relaxed);
+                let rate = if total > 0 {
+                    (faults as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                tracing::info!(
+                    pid = std::process::id(),
+                    function = FN_NAME,
+                    total_calls = total,
+                    faults_injected = faults,
+                    injection_rate = format!("{:.2}%", rate),
+                    "[STATS] {} injection rate: {}/{} ({:.2}%)",
+                    FN_NAME,
+                    faults,
+                    total,
+                    rate
+                );
+            }
+
             // build params and check for fault injection
             let params = #build_params_body;
             if let Some(error_code) = crate::interception::should_inject_fault_for_hook(&#hook_enabled)
